@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 import {
   LayoutDashboard,
   ShoppingCart,
@@ -50,6 +50,7 @@ const TAB_CONFIG: Record<AppMenuId, { label: string; icon: React.ReactNode }> = 
   transfers: { label: 'Transfers', icon: <ArrowLeftRight className="w-3.5 h-3.5" /> },
   branches: { label: 'Branches', icon: <Store className="w-3.5 h-3.5" /> },
   products: { label: 'Products', icon: <Package className="w-3.5 h-3.5" /> },
+  customers: { label: 'Customers', icon: <UserCheck className="w-3.5 h-3.5" /> },
   financial: { label: 'Financial', icon: <Landmark className="w-3.5 h-3.5" /> },
   reports: { label: 'Reports', icon: <BarChart3 className="w-3.5 h-3.5" /> },
   approvals: { label: 'Approvals', icon: <CheckSquare className="w-3.5 h-3.5" /> },
@@ -253,3 +254,4 @@ export const Navbar: React.FC<NavbarProps> = ({
     </header>
   );
 };
+

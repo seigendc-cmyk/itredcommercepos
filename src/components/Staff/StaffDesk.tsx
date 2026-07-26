@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 import { StaffMember, AppMenuId, AppMenuDefinition, Branch, Terminal } from '../../types';
 import { 
   LayoutDashboard, 
@@ -37,6 +37,7 @@ const MENU_DEFINITIONS: Record<AppMenuId, AppMenuDefinition> = {
   transfers: { id: 'transfers', label: 'Stock Transfers', description: 'Inter-branch stock movement logs', category: 'inventory' },
   branches: { id: 'branches', label: 'Branches & Terminals', description: 'Multi-store location & terminal config', category: 'management' },
   products: { id: 'products', label: 'Products Catalog', description: 'Master catalog & pricing setup', category: 'inventory' },
+  customers: { id: 'customers', label: 'Customers', description: 'Customer profiles, accounts and purchase activity', category: 'management' },
   financial: { id: 'financial', label: 'Financial & Check Writer', description: 'Chart of accounts, protected COGS reserves & check writer', category: 'management' },
   reports: { id: 'reports', label: 'Sales & Reports', description: 'Financial analytics & order audits', category: 'management' },
   approvals: { id: 'approvals', label: 'Approvals & Workflows', description: 'Strict transaction review & authorization', category: 'governance' },
@@ -54,6 +55,7 @@ const MENU_ICONS: Record<AppMenuId, React.ReactNode> = {
   transfers: <ArrowLeftRight className="w-5 h-5 text-[#FF6B00]" />,
   branches: <Store className="w-5 h-5 text-[#FF6B00]" />,
   products: <Package className="w-5 h-5 text-[#FF6B00]" />,
+  customers: <Users className="w-5 h-5 text-[#FF6B00]" />,
   financial: <Landmark className="w-5 h-5 text-[#FF6B00]" />,
   reports: <BarChart3 className="w-5 h-5 text-[#FF6B00]" />,
   approvals: <CheckSquare className="w-5 h-5 text-[#FF6B00]" />,
@@ -83,7 +85,7 @@ export function StaffDesk({ staff, activeBranch, activeTerminal, pendingApproval
               </span>
             </div>
             <p className="text-xs text-gray-300 mt-1 flex items-center gap-2">
-              <span>{staff.email}</span> • 
+              <span>{staff.email}</span> â€¢ 
               <span className="text-gray-400">Location: {activeBranch?.name || 'Main HQ'} ({activeTerminal?.name || 'Terminal 01'})</span>
             </p>
           </div>
@@ -169,3 +171,4 @@ export function StaffDesk({ staff, activeBranch, activeTerminal, pendingApproval
     </div>
   );
 }
+
