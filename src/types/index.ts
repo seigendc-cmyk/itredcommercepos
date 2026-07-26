@@ -1,4 +1,16 @@
 export type SubscriptionPlanType = 'starter_free' | 'pro_delivery' | 'enterprise_fleet';
+export type ResourceType = 'warehouse' | 'branch' | 'terminal';
+export type ResourceLicenseStatus = 'licensed' | 'unlicensed';
+export type ResourceLifecycleStatus = 'active' | 'suspended' | 'archived';
+
+export interface ResourceAddonEntitlement {
+  id: string;
+  resourceType: ResourceType;
+  quantity: number;
+  status: 'active' | 'suspended' | 'expired';
+  startDate: string;
+  expiryDate?: string;
+}
 
 export interface VendorProfile {
   id: string;
@@ -85,6 +97,8 @@ export interface Warehouse {
   code: string;
   location: string;
   isDefault: boolean;
+  licenseStatus?: ResourceLicenseStatus;
+  status?: ResourceLifecycleStatus;
   createdAt: string;
 }
 
@@ -96,6 +110,8 @@ export interface Branch {
   address: string;
   phone: string;
   isDefault: boolean;
+  licenseStatus?: ResourceLicenseStatus;
+  status?: ResourceLifecycleStatus;
   createdAt: string;
 }
 
@@ -106,7 +122,8 @@ export interface Terminal {
   name: string;
   code: string;
   isDefault: boolean;
-  status: 'active' | 'inactive';
+  licenseStatus?: ResourceLicenseStatus;
+  status: ResourceLifecycleStatus | 'inactive';
   createdAt: string;
 }
 
@@ -120,10 +137,64 @@ export interface Product {
   costPrice: number;
   sellingPrice: number;
   barcode?: string;
+  brand?: string;
+  manufacturerCode?: string;
   unit: string;
   reorderLevel: number;
   location?: string;
   shelf?: string;
+  createdAt: string;
+}
+
+export interface Supplier {
+  id: string;
+  vendorId: string;
+  name: string;
+  code?: string;
+  status?: 'active' | 'suspended' | 'archived';
+  createdAt?: string;
+}
+
+export type PurchaseOrderStatus =
+  | 'DRAFT'
+  | 'OPEN'
+  | 'PARTIALLY_RECEIVED'
+  | 'COMPLETED'
+  | 'CANCELLED';
+
+export interface PurchaseOrderItem {
+  productId: string;
+  productName: string;
+  sku?: string;
+  orderedQuantity: number;
+  receivedQuantity: number;
+  unitCost: number;
+  unitOfMeasure?: string;
+  batchNumber?: string;
+}
+
+export interface PurchaseOrder {
+  id: string;
+  vendorId: string;
+  supplierId: string;
+  supplierName: string;
+  orderNumber: string;
+  status: PurchaseOrderStatus;
+  items: PurchaseOrderItem[];
+  createdAt: string;
+  updatedAt?: string;
+  completedAt?: string;
+  cancelledAt?: string;
+}
+
+export interface ProductLedgerEntry {
+  id: string;
+  productId: string;
+  movementType: string;
+  quantityDelta: number;
+  quantityBefore: number;
+  quantityAfter: number;
+  sourceDocumentReference: string;
   createdAt: string;
 }
 
@@ -151,6 +222,8 @@ export interface SupplierReceipt {
   warehouseId: string;
   supplierName: string;
   referenceNo: string; // PO or Invoice number
+  purchaseOrderId?: string;
+  purchaseOrderNumber?: string;
   date: string;
   items: {
     productId: string;
@@ -158,12 +231,31 @@ export interface SupplierReceipt {
     quantity: number;
     unitCost: number;
     totalCost: number;
+    sku?: string;
+    orderedQuantity?: number;
+    previouslyReceivedQuantity?: number;
+    unitOfMeasure?: string;
+    batchNumber?: string;
   }[];
   totalAmount: number;
   notes?: string;
   createdBy: string;
+  status?: InventoryWorkflowStatus;
   createdAt: string;
 }
+
+export type InventoryWorkflowStatus =
+  | 'DRAFT'
+  | 'SUBMITTED'
+  | 'PENDING_APPROVAL'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'CANCELLED'
+  | 'PROCESSING'
+  | 'IN_TRANSIT'
+  | 'PARTIALLY_RECEIVED'
+  | 'COMPLETED'
+  | 'FAILED';
 
 export interface StockTransfer {
   id: string;
@@ -171,6 +263,8 @@ export interface StockTransfer {
   transferNo: string;
   sourceWarehouseId: string;
   sourceWarehouseName: string;
+  sourceBranchId?: string;
+  sourceBranchName?: string;
   targetBranchId: string;
   targetBranchName: string;
   date: string;
@@ -178,9 +272,28 @@ export interface StockTransfer {
     productId: string;
     productName: string;
     quantity: number;
+    quantityRequested?: number;
+    quantityApproved?: number;
+    quantityDispatched?: number;
+    sku?: string;
+    quantityReceived?: number;
+    unitOfMeasure?: string;
+    batchNumber?: string;
+    serialNumber?: string;
+    expiryDate?: string;
   }[];
-  status: 'completed' | 'pending' | 'cancelled';
+  status: InventoryWorkflowStatus | 'completed' | 'pending' | 'cancelled';
   notes?: string;
+  requestedAt?: string;
+  approvedAt?: string;
+  dispatchedAt?: string;
+  expectedReceiptAt?: string;
+  requester?: WorkflowActor;
+  approver?: WorkflowActor;
+  dispatcher?: WorkflowActor;
+  receivingOfficer?: WorkflowActor;
+  barcodeReference?: string;
+  version?: number;
   createdAt: string;
 }
 
@@ -199,6 +312,7 @@ export interface StockAdjustment {
     reason?: string;
   }[];
   notes?: string;
+  status?: InventoryWorkflowStatus;
   createdAt: string;
 }
 
@@ -299,7 +413,9 @@ export interface BillingPlan {
   currency: string;
   description: string;
   features: string[];
+  maxWarehouses?: number;
   maxBranches: number;
+  maxTerminals?: number;
   maxStaff: number;
   isPopular?: boolean;
   status: 'active' | 'archived';
@@ -327,6 +443,7 @@ export interface VendorSubscription {
   expiryDate: string; // ISO date string
   autoRenew: boolean;
   status: 'active' | 'expiring_soon' | 'expired';
+  resourceAddons?: ResourceAddonEntitlement[];
   lastInvoiceId?: string;
   autoInvoiceGeneratedForPeriod?: string;
 }
@@ -385,31 +502,117 @@ export interface StaffMember {
   lastActiveAt?: string;
 }
 
-export type ApprovalRequestType = 
+export type ApprovalRequestType =
   | 'stock_adjustment' 
   | 'supplier_intake' 
   | 'stock_transfer' 
+  | 'purchase_order_cancellation'
   | 'large_discount' 
   | 'order_refund';
 
+export type CriticalInventoryEntityType =
+  | 'WAREHOUSE_TO_BRANCH_TRANSFER'
+  | 'BRANCH_TO_BRANCH_TRANSFER'
+  | 'SUPPLIER_STOCK_RECEIPT'
+  | 'PURCHASE_ORDER_CANCELLATION'
+  | 'OPENING_BALANCE_ADJUSTMENT'
+  | 'STOCKTAKE_ADJUSTMENT';
+
+export interface WorkflowActor {
+  id: string;
+  name: string;
+  role: StaffRole;
+}
+
+export interface ApprovalInventoryItem {
+  productId: string;
+  productName: string;
+  sku?: string;
+  quantity?: number;
+  quantityReceived?: number;
+  unitOfMeasure?: string;
+  batchNumber?: string;
+  serialNumber?: string;
+  expiryDate?: string;
+  orderedQuantity?: number;
+  previouslyReceivedQuantity?: number;
+  quantityDelta?: number;
+  unitCost?: number;
+  reason?: string;
+  systemQty?: number;
+  countedQty?: number;
+}
+
+export interface ApprovalDataPayload {
+  sourceType?: 'warehouse' | 'branch';
+  sourceId?: string;
+  sourceName?: string;
+  targetBranchId?: string;
+  targetBranchName?: string;
+  locationType?: 'warehouse' | 'branch';
+  locationId?: string;
+  locationName?: string;
+  supplierName?: string;
+  referenceNo?: string;
+  notes?: string;
+  purchaseOrderId?: string;
+  purchaseOrderNumber?: string;
+  supplierId?: string;
+  overReceiptExceptionRequested?: boolean;
+  overReceiptReason?: string;
+  items?: ApprovalInventoryItem[];
+  [key: string]: unknown;
+}
+
+export interface ApprovalQuantityDecision {
+  productId: string;
+  productName: string;
+  locationType: 'warehouse' | 'branch';
+  locationId: string;
+  beforeQuantity: number;
+  quantityDelta: number;
+  afterQuantity: number;
+}
+
+export interface InventoryApprovalPolicy {
+  segregationOfDuties: boolean;
+  supplierReceiptAutoApprovalRoles: StaffRole[];
+}
+
 export interface ApprovalRequest {
   id: string;
+  tenantId: string;
   vendorId: string;
+  entityType: CriticalInventoryEntityType;
+  entityId: string;
   type: ApprovalRequestType;
   title: string;
   description: string;
   requesterId: string;
   requesterName: string;
   requesterRole: StaffRole;
+  requester: WorkflowActor;
+  approver?: WorkflowActor;
   branchId?: string;
   branchName?: string;
-  dataPayload: any; // e.g. stock adjustment items, transfer payload
-  status: 'pending' | 'approved' | 'rejected';
+  warehouseId?: string;
+  warehouseName?: string;
+  dataPayload: ApprovalDataPayload;
+  status: InventoryWorkflowStatus;
+  version: number;
+  segregationOfDuties: boolean;
+  notificationAudienceRoles: StaffRole[];
+  requestedAt: string;
+  decisionAt?: string;
+  outcome?: InventoryWorkflowStatus;
+  reason?: string;
+  quantityDecisions?: ApprovalQuantityDecision[];
   reviewedBy?: string;
   reviewedByName?: string;
   reviewedAt?: string;
   reviewComment?: string;
   createdAt: string;
+  updatedAt: string;
 }
 
 export type AccountType = 'asset' | 'liability' | 'equity' | 'revenue' | 'expense';
@@ -528,4 +731,3 @@ export interface CollectionActivity {
   loggedBy: string;
   createdAt: string;
 }
-

@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test src/auth/authPolicy.test.ts src/services/inventoryApprovalWorkflow.test.ts src/services/resourceEntitlements.test.ts src/services/saleTransaction.test.ts src/services/transferSlip.test.ts src/services/supplierReceiving.test.ts src/services/stockTransferWorkflow.test.ts src/offline/offlineDatabase.test.ts src/offline/offlineCheckout.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -21,16 +22,18 @@
     "motion": "^12.23.24",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "sql.js": "^1.14.1",
     "vite": "^6.2.3"
   },
   "devDependencies": {
+    "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
+    "@types/sql.js": "^1.4.11",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3",
-    "@types/express": "^4.17.21"
+    "vite": "^6.2.3"
   }
 }

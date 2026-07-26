@@ -8,7 +8,9 @@ import {
   where,
   addDoc,
   updateDoc,
-  onSnapshot
+  onSnapshot,
+  runTransaction,
+  writeBatch
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import {
@@ -46,12 +48,74 @@ import {
   CreditSale,
   CreditSaleItem,
   CreditPayment,
-  CollectionActivity
+  CollectionActivity,
+  ResourceLifecycleStatus,
+  ResourceType,
+  CriticalInventoryEntityType,
+  InventoryApprovalPolicy,
+  InventoryWorkflowStatus,
+  WorkflowActor,
+  ApprovalDataPayload,
+  ApprovalQuantityDecision,
+  ProductLedgerEntry,
+  PurchaseOrder,
+  PurchaseOrderItem,
+  PurchaseOrderStatus,
+  Supplier
 } from '../types';
 import { logBIEvent } from '../bi/tracker';
+import {
+  completeSaleTransaction,
+  SaleCompletionResult,
+} from './saleTransaction';
+import {
+  assertTerminalBelongsToActiveBranch,
+  canResourceProcessTransactions,
+  ResourceEntitlementService,
+} from './resourceEntitlements';
+import {
+  createPendingInventoryRequest,
+  decideInventoryRequest,
+  DEFAULT_INVENTORY_APPROVAL_POLICY,
+  INVENTORY_WORKFLOW_POLICIES,
+  InventoryWorkflowError,
+  isSupplierReceiptAutoApproved,
+  markInventoryRequestCompleted,
+  markInventoryRequestProcessing,
+} from './inventoryApprovalWorkflow';
+import {
+  assertReceiptAllowed,
+  compareReceiptToPurchaseOrder,
+  mergeReceiptLine,
+  nextPurchaseOrderStatus,
+  ReceiptDraftLine,
+} from './supplierReceiving';
+import {
+  addTransferLine,
+  assertCanDispatch,
+  assertRequestedStockAvailable,
+  assertWarehouseToBranchRoute,
+  canAccessTransferLedger,
+  TransferDraftLine,
+  validateTransferReceipt,
+} from './stockTransferWorkflow';
 
 // Helper for local caching/fallback to ensure snappy preview & offline resiliency
 const LOCAL_STORAGE_KEY = 'itred_pos_vendor_data_';
+
+const resourceEntitlementService = new ResourceEntitlementService(async event => {
+  await logBIEvent(
+    event.vendorId,
+    event.type,
+    `${event.type.replaceAll('_', ' ').toLowerCase()}: ${event.resourceType}${event.resourceId ? ` ${event.resourceId}` : ''}`,
+    {
+      resourceType: event.resourceType,
+      resourceId: event.resourceId,
+      planId: event.planId,
+      ...event.details,
+    },
+  );
+});
 
 export function getLocalVendor(vendorId: string): VendorProfile | null {
   try {
@@ -125,7 +189,7 @@ const STARTER_PRODUCTS: Omit<Product, 'id' | 'vendorId' | 'createdAt'>[] = [
 ];
 
 // Fetch Vendor Profile from Firestore with fallback
-export async function fetchVendorProfile(vendorId: string, userEmail?: string): Promise<VendorProfile | null> {
+export async function fetchVendorProfile(vendorId: string): Promise<VendorProfile | null> {
   try {
     const docRef = doc(db, 'vendors', vendorId);
     const snap = await getDoc(docRef);
@@ -140,16 +204,6 @@ export async function fetchVendorProfile(vendorId: string, userEmail?: string): 
 
   const cached = getLocalVendor(vendorId);
   if (cached) return cached;
-
-  // Auto-provision returning demo vendor profile if accessing seigendc@gmail.com
-  if (userEmail === 'seigendc@gmail.com' || vendorId.includes('c2VpZ2VuZGNAZ21haWwuY29t')) {
-    const onboarded = await onboardVendor(vendorId, 'seigendc@gmail.com', {
-      businessName: 'iTred Retail HQ',
-      address: '742 Evergreen Terrace, Commerce Hub',
-      phone: '+1 (555) 019-2831'
-    });
-    return onboarded.profile;
-  }
 
   return null;
 }
@@ -188,6 +242,8 @@ export async function onboardVendor(
     code: 'WH-01',
     location: details.address || 'Central HQ',
     isDefault: true,
+    licenseStatus: 'licensed',
+    status: 'active',
     createdAt: now,
   };
 
@@ -200,6 +256,8 @@ export async function onboardVendor(
     address: details.address || 'Main St',
     phone: details.phone || '',
     isDefault: true,
+    licenseStatus: 'licensed',
+    status: 'active',
     createdAt: now,
   };
 
@@ -211,6 +269,7 @@ export async function onboardVendor(
     name: 'Terminal 01',
     code: 'TERM-01',
     isDefault: true,
+    licenseStatus: 'licensed',
     status: 'active',
     createdAt: now,
   };
@@ -294,6 +353,8 @@ export async function fetchWarehouses(vendorId: string): Promise<Warehouse[]> {
       code: 'WH-01',
       location: 'Main HQ',
       isDefault: true,
+      licenseStatus: 'licensed',
+      status: 'active',
       createdAt: new Date().toISOString()
     }
   ];
@@ -320,13 +381,93 @@ export async function fetchBranches(vendorId: string): Promise<Branch[]> {
       address: 'Main Store',
       phone: '555-0199',
       isDefault: true,
+      licenseStatus: 'licensed',
+      status: 'active',
       createdAt: new Date().toISOString()
     }
   ];
 }
 
+async function getResourceEntitlementContext(vendorId: string, resourceType: ResourceType) {
+  const [subscription, plans, resources] = await Promise.all([
+    fetchVendorSubscription(vendorId),
+    fetchBillingPlans(),
+    resourceType === 'warehouse'
+      ? fetchWarehouses(vendorId)
+      : resourceType === 'branch'
+        ? fetchBranches(vendorId)
+        : fetchTerminals(vendorId),
+  ]);
+  const plan =
+    plans.find(candidate => candidate.id === subscription.planId && candidate.status === 'active') ||
+    DEFAULT_BILLING_PLANS.find(candidate => candidate.id === 'starter_free')!;
+
+  return { subscription, plan, resources };
+}
+
+async function requireResourceActivationEntitlement(
+  vendorId: string,
+  resourceType: ResourceType,
+) {
+  const context = await getResourceEntitlementContext(vendorId, resourceType);
+  await resourceEntitlementService.checkActivation({
+    vendorId,
+    resourceType,
+    plan: context.plan,
+    subscription: context.subscription,
+    resources: context.resources,
+  });
+  return context;
+}
+
+async function requireActiveOperationalResource(
+  vendorId: string,
+  resourceType: Extract<ResourceType, 'warehouse' | 'branch'>,
+  resourceId: string,
+): Promise<void> {
+  const resources = resourceType === 'warehouse'
+    ? await fetchWarehouses(vendorId)
+    : await fetchBranches(vendorId);
+  const resource = resources.find(candidate => candidate.id === resourceId);
+  if (!resource || resource.vendorId !== vendorId || !canResourceProcessTransactions(resource)) {
+    throw new Error(`The selected ${resourceType} is suspended, archived, unlicensed, or unavailable.`);
+  }
+}
+
+// Add New Warehouse
+export async function createWarehouse(
+  vendorId: string,
+  name: string,
+  location: string,
+): Promise<Warehouse> {
+  const { plan } = await requireResourceActivationEntitlement(vendorId, 'warehouse');
+  const now = new Date().toISOString();
+  const current = await fetchWarehouses(vendorId);
+  const id = `wh_${vendorId}_${Math.random().toString(36).substring(2, 7)}`;
+  const warehouse: Warehouse = {
+    id,
+    vendorId,
+    name,
+    code: `WH-${String(current.length + 1).padStart(2, '0')}`,
+    location,
+    isDefault: false,
+    licenseStatus: 'licensed',
+    status: 'active',
+    createdAt: now,
+  };
+
+  await setDoc(doc(db, 'vendors', vendorId, 'warehouses', id), warehouse);
+  localStorage.setItem(
+    `${LOCAL_STORAGE_KEY}_wh_${vendorId}`,
+    JSON.stringify([...current, warehouse]),
+  );
+  await resourceEntitlementService.recordActivationApproved(vendorId, 'warehouse', id, plan.id);
+  return warehouse;
+}
+
 // Add New Branch
 export async function createBranch(vendorId: string, name: string, address: string, phone: string): Promise<Branch> {
+  const { plan } = await requireResourceActivationEntitlement(vendorId, 'branch');
   const now = new Date().toISOString();
   const id = `br_${vendorId}_${Math.random().toString(36).substring(2, 7)}`;
   const count = (await fetchBranches(vendorId)).length + 1;
@@ -338,23 +479,19 @@ export async function createBranch(vendorId: string, name: string, address: stri
     address,
     phone,
     isDefault: false,
+    licenseStatus: 'licensed',
+    status: 'active',
     createdAt: now,
   };
 
-  try {
-    await setDoc(doc(db, 'vendors', vendorId, 'branches', id), newBranch);
-  } catch (e) {
-    console.warn(e);
-  }
+  await setDoc(doc(db, 'vendors', vendorId, 'branches', id), newBranch);
 
   // Update local
   const current = await fetchBranches(vendorId);
   const updated = [...current, newBranch];
   localStorage.setItem(`${LOCAL_STORAGE_KEY}_br_${vendorId}`, JSON.stringify(updated));
 
-  // Also create a default terminal for this new branch
-  await createTerminal(vendorId, id, `${name} POS 1`);
-
+  await resourceEntitlementService.recordActivationApproved(vendorId, 'branch', id, plan.id);
   return newBranch;
 }
 
@@ -382,6 +519,7 @@ export async function fetchTerminals(vendorId: string, branchId?: string): Promi
       name: 'Terminal 01',
       code: 'TERM-01',
       isDefault: true,
+      licenseStatus: 'licensed',
       status: 'active',
       createdAt: new Date().toISOString()
     }
@@ -391,6 +529,9 @@ export async function fetchTerminals(vendorId: string, branchId?: string): Promi
 
 // Add New Terminal
 export async function createTerminal(vendorId: string, branchId: string, name: string): Promise<Terminal> {
+  const branches = await fetchBranches(vendorId);
+  assertTerminalBelongsToActiveBranch(branchId, branches);
+  const { plan } = await requireResourceActivationEntitlement(vendorId, 'terminal');
   const now = new Date().toISOString();
   const id = `term_${vendorId}_${Math.random().toString(36).substring(2, 7)}`;
   const count = (await fetchTerminals(vendorId, branchId)).length + 1;
@@ -401,20 +542,120 @@ export async function createTerminal(vendorId: string, branchId: string, name: s
     name,
     code: `TERM-0${count}`,
     isDefault: count === 1,
+    licenseStatus: 'licensed',
     status: 'active',
     createdAt: now,
   };
 
-  try {
-    await setDoc(doc(db, 'vendors', vendorId, 'terminals', id), newTerm);
-  } catch (e) {
-    console.warn(e);
-  }
+  await setDoc(doc(db, 'vendors', vendorId, 'terminals', id), newTerm);
 
   const current = await fetchTerminals(vendorId);
   localStorage.setItem(`${LOCAL_STORAGE_KEY}_term_${vendorId}`, JSON.stringify([...current, newTerm]));
 
+  await resourceEntitlementService.recordActivationApproved(vendorId, 'terminal', id, plan.id);
   return newTerm;
+}
+
+function resourceCollection(resourceType: ResourceType): 'warehouses' | 'branches' | 'terminals' {
+  if (resourceType === 'warehouse') return 'warehouses';
+  if (resourceType === 'branch') return 'branches';
+  return 'terminals';
+}
+
+function resourceLocalStorageKey(resourceType: ResourceType, vendorId: string): string {
+  if (resourceType === 'warehouse') return `${LOCAL_STORAGE_KEY}_wh_${vendorId}`;
+  if (resourceType === 'branch') return `${LOCAL_STORAGE_KEY}_br_${vendorId}`;
+  return `${LOCAL_STORAGE_KEY}_term_${vendorId}`;
+}
+
+export async function updateResourceLifecycleStatus(
+  vendorId: string,
+  resourceType: ResourceType,
+  resourceId: string,
+  status: ResourceLifecycleStatus,
+): Promise<void> {
+  const context = await getResourceEntitlementContext(vendorId, resourceType);
+  const resource = context.resources.find(candidate => candidate.id === resourceId);
+  if (!resource) throw new Error(`The selected ${resourceType} does not exist.`);
+  if (resource.status === 'archived') throw new Error('Archived resources cannot be reactivated or modified.');
+
+  if (status === 'active') {
+    await resourceEntitlementService.checkActivation({
+      vendorId,
+      resourceType,
+      plan: context.plan,
+      subscription: context.subscription,
+      resources: context.resources.filter(candidate => candidate.id !== resourceId),
+    });
+  }
+
+  const affectedTerminals = resourceType === 'branch' && status !== 'active'
+    ? (await fetchTerminals(vendorId)).filter(
+        terminal => terminal.branchId === resourceId && terminal.status !== 'archived',
+      )
+    : [];
+  const nextLicenseStatus = status === 'active'
+    ? 'licensed'
+    : resource.licenseStatus || 'licensed';
+  const batch = writeBatch(db);
+  batch.set(
+    doc(db, 'vendors', vendorId, resourceCollection(resourceType), resourceId),
+    { status, licenseStatus: nextLicenseStatus },
+    { merge: true },
+  );
+  for (const terminal of affectedTerminals) {
+    batch.set(
+      doc(db, 'vendors', vendorId, 'terminals', terminal.id),
+      { status, licenseStatus: terminal.licenseStatus || 'licensed' },
+      { merge: true },
+    );
+  }
+  await batch.commit();
+
+  const updatedResources = context.resources.map(candidate =>
+    candidate.id === resourceId
+      ? { ...candidate, status, licenseStatus: nextLicenseStatus }
+      : candidate,
+  );
+  localStorage.setItem(
+    resourceLocalStorageKey(resourceType, vendorId),
+    JSON.stringify(updatedResources),
+  );
+
+  if (resourceType === 'branch' && status !== 'active') {
+    const terminals = await fetchTerminals(vendorId);
+    await Promise.all(affectedTerminals.map(terminal =>
+      resourceEntitlementService.recordLifecycleChange(
+        vendorId,
+        'terminal',
+        terminal.id,
+        status,
+      ),
+    ));
+    if (affectedTerminals.length > 0) {
+      const affectedIds = new Set(affectedTerminals.map(terminal => terminal.id));
+      const updatedTerminals = terminals.map(terminal =>
+        affectedIds.has(terminal.id)
+          ? { ...terminal, status, licenseStatus: terminal.licenseStatus || 'licensed' }
+          : terminal,
+      );
+      localStorage.setItem(
+        resourceLocalStorageKey('terminal', vendorId),
+        JSON.stringify(updatedTerminals),
+      );
+    }
+  }
+
+  if (status === 'active') {
+    await resourceEntitlementService.recordActivationApproved(
+      vendorId,
+      resourceType,
+      resourceId,
+      context.plan.id,
+    );
+  } else {
+    await resourceEntitlementService.recordLifecycleChange(vendorId, resourceType, resourceId, status);
+  }
 }
 
 // Fetch Products
@@ -622,62 +863,192 @@ export async function fetchBranchStock(vendorId: string, branchId: string): Prom
 export async function receiveSupplierStock(
   vendorId: string,
   warehouseId: string,
+  supplierId: string,
   supplierName: string,
   referenceNo: string,
-  items: { productId: string; productName: string; quantity: number; unitCost: number }[],
-  notes?: string
-): Promise<SupplierReceipt> {
-  const now = new Date().toISOString();
-  const receiptId = `rec_${Math.random().toString(36).substring(2, 9)}`;
-  const totalAmount = items.reduce((sum, item) => sum + (item.quantity * item.unitCost), 0);
-
-  const receipt: SupplierReceipt = {
-    id: receiptId,
-    vendorId,
-    warehouseId,
-    supplierName,
-    referenceNo,
-    date: now,
-    items: items.map(i => ({ ...i, totalCost: i.quantity * i.unitCost })),
-    totalAmount,
-    notes,
-    createdBy: 'Vendor Admin',
-    createdAt: now,
-  };
-
-  // Update Warehouse Inventory
-  const currentWhStock = await fetchWarehouseStock(vendorId, warehouseId);
-  items.forEach(item => {
-    const prev = currentWhStock[item.productId] || 0;
-    currentWhStock[item.productId] = prev + item.quantity;
-  });
-
-  // Save Firestore
-  try {
-    await setDoc(doc(db, 'vendors', vendorId, 'supplier_receipts', receiptId), receipt);
-    for (const item of items) {
-      const invId = `${vendorId}_${warehouseId}_${item.productId}`;
-      const invData: WarehouseInventory = {
-        id: invId,
-        vendorId,
-        warehouseId,
-        productId: item.productId,
-        quantity: currentWhStock[item.productId],
-        lastUpdated: now,
-      };
-      await setDoc(doc(db, 'vendors', vendorId, 'warehouse_inventory', invId), invData);
-    }
-  } catch (e) {
-    console.warn('Firestore receive stock error', e);
+  items: ReceiptDraftLine[],
+  notes: string | undefined,
+  requester: WorkflowActor,
+  purchaseOrder?: PurchaseOrder,
+  overReceiptException?: { requested: boolean; reason?: string },
+): Promise<ApprovalRequest> {
+  await requireActiveOperationalResource(vendorId, 'warehouse', warehouseId);
+  const mergedItems = items.reduce<ReceiptDraftLine[]>(
+    (current, item) => mergeReceiptLine(current, item),
+    [],
+  );
+  const comparisons = compareReceiptToPurchaseOrder(mergedItems, purchaseOrder);
+  assertReceiptAllowed('warehouse', comparisons, Boolean(overReceiptException?.requested));
+  if (
+    overReceiptException?.requested &&
+    comparisons.some(item => item.status === 'OVER_RECEIPT') &&
+    !overReceiptException.reason?.trim()
+  ) {
+    throw new Error('Provide a reason for the over-receipt exception request.');
   }
+  const receiptId = `rec_${Math.random().toString(36).substring(2, 9)}`;
+  const warehouse = (await fetchWarehouses(vendorId)).find(candidate => candidate.id === warehouseId);
+  const request = await createApprovalRequest(vendorId, {
+    entityType: 'SUPPLIER_STOCK_RECEIPT',
+    entityId: receiptId,
+    title: `Supplier stock receipt ${referenceNo}`,
+    description: `${items.length} supplier item${items.length === 1 ? '' : 's'} submitted for warehouse receipt approval.${overReceiptException?.requested ? ' Includes an over-receipt exception request.' : ''}`,
+    requester,
+    warehouseId,
+    warehouseName: warehouse?.name,
+    dataPayload: {
+      locationType: 'warehouse',
+      locationId: warehouseId,
+      supplierId,
+      supplierName,
+      referenceNo,
+      purchaseOrderId: purchaseOrder?.id,
+      purchaseOrderNumber: purchaseOrder?.orderNumber,
+      overReceiptExceptionRequested: Boolean(overReceiptException?.requested),
+      overReceiptReason: overReceiptException?.reason?.trim(),
+      notes,
+      items: comparisons,
+    },
+  });
+  const policy = await fetchInventoryApprovalPolicy(vendorId);
+  if (!overReceiptException?.requested && isSupplierReceiptAutoApproved(requester, policy)) {
+    return reviewApprovalRequest(
+      vendorId,
+      request.id,
+      'APPROVED',
+      { id: 'policy:auto_supplier_receipt', name: `Auto-approval policy (${requester.role})`, role: 'sysadmin' },
+      request.version,
+      `Auto-approved by active ${requester.role} supplier receipt policy.`,
+    );
+  }
+  return request;
+}
 
-  // Save local
-  localStorage.setItem(`${LOCAL_STORAGE_KEY}_wh_stock_${vendorId}_${warehouseId}`, JSON.stringify(currentWhStock));
-  const existingReceiptsRaw = localStorage.getItem(`${LOCAL_STORAGE_KEY}_receipts_${vendorId}`);
-  const existingReceipts = existingReceiptsRaw ? JSON.parse(existingReceiptsRaw) : [];
-  localStorage.setItem(`${LOCAL_STORAGE_KEY}_receipts_${vendorId}`, JSON.stringify([receipt, ...existingReceipts]));
+function normalizePurchaseOrder(
+  vendorId: string,
+  id: string,
+  data: Record<string, unknown>,
+): PurchaseOrder {
+  const rawItems = Array.isArray(data.items) ? data.items : [];
+  const items: PurchaseOrderItem[] = rawItems.map(raw => {
+    const item = raw as Record<string, unknown>;
+    return {
+      productId: String(item.productId || ''),
+      productName: String(item.productName || item.name || 'Unknown product'),
+      sku: item.sku ? String(item.sku) : undefined,
+      orderedQuantity: Number(item.orderedQuantity ?? item.quantity ?? 0),
+      receivedQuantity: Number(item.receivedQuantity ?? item.quantityReceived ?? 0),
+      unitCost: Number(item.unitCost ?? item.costPrice ?? 0),
+      unitOfMeasure: item.unitOfMeasure ? String(item.unitOfMeasure) : undefined,
+      batchNumber: item.batchNumber ? String(item.batchNumber) : undefined,
+    };
+  });
+  const rawStatus = String(data.status || 'OPEN').toUpperCase();
+  const status: PurchaseOrderStatus =
+    rawStatus === 'PARTIALLY_RECEIVED' ||
+    rawStatus === 'COMPLETED' ||
+    rawStatus === 'CANCELLED' ||
+    rawStatus === 'DRAFT'
+      ? rawStatus
+      : 'OPEN';
+  return {
+    id,
+    vendorId,
+    supplierId: String(data.supplierId || data.supplierName || ''),
+    supplierName: String(data.supplierName || 'Unknown supplier'),
+    orderNumber: String(data.orderNumber || data.referenceNo || id),
+    status,
+    items,
+    createdAt: String(data.createdAt || new Date(0).toISOString()),
+    updatedAt: data.updatedAt ? String(data.updatedAt) : undefined,
+    completedAt: data.completedAt ? String(data.completedAt) : undefined,
+    cancelledAt: data.cancelledAt ? String(data.cancelledAt) : undefined,
+  };
+}
 
-  return receipt;
+export async function fetchPurchaseOrders(vendorId: string): Promise<PurchaseOrder[]> {
+  const snapshot = await getDocs(collection(db, 'vendors', vendorId, 'purchase_orders'));
+  return snapshot.docs.map(order =>
+    normalizePurchaseOrder(vendorId, order.id, order.data() as Record<string, unknown>),
+  );
+}
+
+export async function fetchSupplierPurchaseOrders(
+  vendorId: string,
+  supplierId: string,
+): Promise<PurchaseOrder[]> {
+  const orders = await fetchPurchaseOrders(vendorId);
+  return orders.filter(order =>
+    order.supplierId === supplierId &&
+    (order.status === 'OPEN' || order.status === 'PARTIALLY_RECEIVED'),
+  );
+}
+
+export async function fetchSuppliers(vendorId: string): Promise<Supplier[]> {
+  const supplierSnapshot = await getDocs(collection(db, 'vendors', vendorId, 'suppliers'));
+  const suppliers = supplierSnapshot.docs.map(item => {
+    const data = item.data();
+    return {
+      id: item.id,
+      vendorId,
+      name: String(data.name || data.supplierName || item.id),
+      code: data.code ? String(data.code) : undefined,
+      status: data.status === 'suspended' || data.status === 'archived' ? data.status : 'active',
+      createdAt: data.createdAt ? String(data.createdAt) : undefined,
+    } satisfies Supplier;
+  }).filter(supplier => supplier.status === 'active');
+  if (suppliers.length > 0) return suppliers;
+
+  const orders = await fetchPurchaseOrders(vendorId);
+  const unique = new Map<string, Supplier>();
+  orders.forEach(order => {
+    unique.set(order.supplierId, {
+      id: order.supplierId,
+      vendorId,
+      name: order.supplierName,
+      status: 'active',
+    });
+  });
+  return [...unique.values()];
+}
+
+export async function fetchProductLedger(
+  vendorId: string,
+  warehouseId: string,
+  productId: string,
+  fromDate?: string,
+  toDate?: string,
+): Promise<ProductLedgerEntry[]> {
+  const snapshot = await getDocs(collection(db, 'vendors', vendorId, 'inventory_movements'));
+  const fromTime = fromDate ? new Date(`${fromDate}T00:00:00`).getTime() : Number.NEGATIVE_INFINITY;
+  const toTime = toDate ? new Date(`${toDate}T23:59:59.999`).getTime() : Number.POSITIVE_INFINITY;
+  return snapshot.docs.flatMap(item => {
+    const data = item.data();
+    const locationType = String(data.locationType || (data.warehouseId ? 'warehouse' : ''));
+    const locationId = String(data.locationId || data.warehouseId || '');
+    const createdAt = String(data.createdAt || '');
+    const createdTime = new Date(createdAt).getTime();
+    if (
+      String(data.productId || '') !== productId ||
+      locationType !== 'warehouse' ||
+      locationId !== warehouseId ||
+      Number.isNaN(createdTime) ||
+      createdTime < fromTime ||
+      createdTime > toTime
+    ) {
+      return [];
+    }
+    return [{
+      id: item.id,
+      productId,
+      movementType: String(data.movementType || data.entityType || 'adjustment'),
+      quantityDelta: Number(data.quantityDelta || 0),
+      quantityBefore: Number(data.quantityBefore ?? data.beforeQuantity ?? 0),
+      quantityAfter: Number(data.quantityAfter ?? data.afterQuantity ?? 0),
+      sourceDocumentReference: String(data.sourceDocumentReference || data.entityId || data.orderId || data.requestId || item.id),
+      createdAt,
+    }];
+  }).sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 }
 
 // Fetch Supplier Receipts
@@ -702,76 +1073,95 @@ export async function transferStockFromWarehouse(
   warehouseName: string,
   targetBranchId: string,
   targetBranchName: string,
-  items: { productId: string; productName: string; quantity: number }[],
-  notes?: string
-): Promise<StockTransfer> {
-  const now = new Date().toISOString();
+  items: {
+    productId: string;
+    productName: string;
+    quantity: number;
+    sku?: string;
+    unitOfMeasure?: string;
+    batchNumber?: string;
+    serialNumber?: string;
+  }[],
+  notes: string | undefined,
+  requester: WorkflowActor,
+): Promise<ApprovalRequest> {
+  const [warehouse, branch, availableStock] = await Promise.all([
+    fetchWarehouses(vendorId).then(list => list.find(item => item.id === warehouseId)),
+    fetchBranches(vendorId).then(list => list.find(item => item.id === targetBranchId)),
+    fetchWarehouseStock(vendorId, warehouseId),
+  ]);
+  if (!warehouse || !branch) throw new Error('Transfer source or destination was not found.');
+  assertWarehouseToBranchRoute(vendorId, 'warehouse', warehouse, 'branch', branch);
+  const draftLines: TransferDraftLine[] = items.map(item => ({
+    ...item,
+    sku: item.sku || '',
+    quantityRequested: item.quantity,
+    quantityApproved: 0,
+    quantityDispatched: 0,
+    quantityReceived: 0,
+    unitOfMeasure: item.unitOfMeasure || 'unit',
+  }));
+  const validatedLines = draftLines.reduce<TransferDraftLine[]>(
+    (current, item) => addTransferLine(current, item),
+    [],
+  );
+  assertRequestedStockAvailable(validatedLines, availableStock);
   const transferId = `trf_${Math.random().toString(36).substring(2, 9)}`;
-
-  // Update Warehouse stock (decrement) & Branch stock (increment)
-  const whStock = await fetchWarehouseStock(vendorId, warehouseId);
-  const brStock = await fetchBranchStock(vendorId, targetBranchId);
-
-  items.forEach(item => {
-    const whPrev = whStock[item.productId] || 0;
-    whStock[item.productId] = Math.max(0, whPrev - item.quantity);
-
-    const brPrev = brStock[item.productId] || 0;
-    brStock[item.productId] = brPrev + item.quantity;
+  return createApprovalRequest(vendorId, {
+    entityType: 'WAREHOUSE_TO_BRANCH_TRANSFER',
+    entityId: transferId,
+    title: `Warehouse transfer to ${targetBranchName}`,
+    description: `${items.length} inventory line${items.length === 1 ? '' : 's'} awaiting transfer approval.`,
+    requester,
+    warehouseId,
+    warehouseName,
+    branchId: targetBranchId,
+    branchName: targetBranchName,
+    dataPayload: {
+      sourceType: 'warehouse',
+      sourceId: warehouseId,
+      sourceName: warehouseName,
+      targetBranchId,
+      targetBranchName,
+      notes,
+      items,
+    },
   });
+}
 
-  const transfer: StockTransfer = {
-    id: transferId,
-    vendorId,
-    transferNo: `TRF-${Math.floor(1000 + Math.random() * 9000)}`,
-    sourceWarehouseId: warehouseId,
-    sourceWarehouseName: warehouseName,
-    targetBranchId,
-    targetBranchName,
-    date: now,
-    items,
-    status: 'completed',
-    notes,
-    createdAt: now,
-  };
-
-  try {
-    await setDoc(doc(db, 'vendors', vendorId, 'transfers', transferId), transfer);
-    for (const item of items) {
-      // Update wh inv
-      const whInvId = `${vendorId}_${warehouseId}_${item.productId}`;
-      await setDoc(doc(db, 'vendors', vendorId, 'warehouse_inventory', whInvId), {
-        id: whInvId,
-        vendorId,
-        warehouseId,
-        productId: item.productId,
-        quantity: whStock[item.productId],
-        lastUpdated: now
-      });
-
-      // Update br inv
-      const brInvId = `${vendorId}_${targetBranchId}_${item.productId}`;
-      await setDoc(doc(db, 'vendors', vendorId, 'branch_inventory', brInvId), {
-        id: brInvId,
-        vendorId,
-        branchId: targetBranchId,
-        productId: item.productId,
-        quantity: brStock[item.productId],
-        lastUpdated: now
-      });
-    }
-  } catch (e) {
-    console.warn('Firestore transfer stock error', e);
-  }
-
-  localStorage.setItem(`${LOCAL_STORAGE_KEY}_wh_stock_${vendorId}_${warehouseId}`, JSON.stringify(whStock));
-  localStorage.setItem(`${LOCAL_STORAGE_KEY}_br_stock_${vendorId}_${targetBranchId}`, JSON.stringify(brStock));
-  
-  const existingTrfRaw = localStorage.getItem(`${LOCAL_STORAGE_KEY}_transfers_${vendorId}`);
-  const existingTrf = existingTrfRaw ? JSON.parse(existingTrfRaw) : [];
-  localStorage.setItem(`${LOCAL_STORAGE_KEY}_transfers_${vendorId}`, JSON.stringify([transfer, ...existingTrf]));
-
-  return transfer;
+export async function transferStockBetweenBranches(
+  vendorId: string,
+  sourceBranchId: string,
+  sourceBranchName: string,
+  targetBranchId: string,
+  targetBranchName: string,
+  items: { productId: string; productName: string; quantity: number }[],
+  notes: string | undefined,
+  requester: WorkflowActor,
+): Promise<ApprovalRequest> {
+  await Promise.all([
+    requireActiveOperationalResource(vendorId, 'branch', sourceBranchId),
+    requireActiveOperationalResource(vendorId, 'branch', targetBranchId),
+  ]);
+  const transferId = `trf_${Math.random().toString(36).substring(2, 9)}`;
+  return createApprovalRequest(vendorId, {
+    entityType: 'BRANCH_TO_BRANCH_TRANSFER',
+    entityId: transferId,
+    title: `Branch transfer: ${sourceBranchName} to ${targetBranchName}`,
+    description: `${items.length} inventory line${items.length === 1 ? '' : 's'} awaiting branch transfer approval.`,
+    requester,
+    branchId: targetBranchId,
+    branchName: targetBranchName,
+    dataPayload: {
+      sourceType: 'branch',
+      sourceId: sourceBranchId,
+      sourceName: sourceBranchName,
+      targetBranchId,
+      targetBranchName,
+      notes,
+      items,
+    },
+  });
 }
 
 // Fetch Stock Transfers
@@ -789,6 +1179,271 @@ export async function fetchStockTransfers(vendorId: string): Promise<StockTransf
   return raw ? JSON.parse(raw) : [];
 }
 
+export async function dispatchStockTransfer(
+  vendorId: string,
+  transferId: string,
+  dispatcher: WorkflowActor,
+  expectedVersion: number,
+): Promise<StockTransfer> {
+  if (!canAccessTransferLedger(dispatcher.role)) {
+    throw new Error('This role is not authorised to dispatch warehouse transfers.');
+  }
+  const transferRef = doc(db, 'vendors', vendorId, 'transfers', transferId);
+  const now = new Date().toISOString();
+  const updated = await runTransaction(db, async transaction => {
+    const transferSnapshot = await transaction.get(transferRef);
+    if (!transferSnapshot.exists()) throw new Error('Transfer not found.');
+    const transfer = transferSnapshot.data() as StockTransfer;
+    if (transfer.vendorId !== vendorId) throw new Error('Transfer tenant mismatch.');
+    if ((transfer.version || 1) !== expectedVersion) {
+      throw new Error('This transfer changed after it was opened. Refresh and try again.');
+    }
+    assertCanDispatch(transfer.status);
+    const warehouseRef = doc(db, 'vendors', vendorId, 'warehouses', transfer.sourceWarehouseId);
+    const branchRef = doc(db, 'vendors', vendorId, 'branches', transfer.targetBranchId);
+    const totals = new Map<string, { productName: string; quantity: number }>();
+    transfer.items.forEach(item => {
+      const quantity = item.quantityApproved ?? item.quantityRequested ?? item.quantity;
+      const current = totals.get(item.productId);
+      totals.set(item.productId, {
+        productName: item.productName,
+        quantity: (current?.quantity || 0) + quantity,
+      });
+    });
+    const productEntries = [...totals.entries()];
+    const inventoryRefs = productEntries.map(([productId]) =>
+      doc(db, 'vendors', vendorId, 'warehouse_inventory', `${vendorId}_${transfer.sourceWarehouseId}_${productId}`),
+    );
+    const [warehouseSnapshot, branchSnapshot, inventorySnapshots] = await Promise.all([
+      transaction.get(warehouseRef),
+      transaction.get(branchRef),
+      Promise.all(inventoryRefs.map(reference => transaction.get(reference))),
+    ]);
+    if (!warehouseSnapshot.exists() || !branchSnapshot.exists()) {
+      throw new Error('Transfer source or destination no longer exists.');
+    }
+    assertWarehouseToBranchRoute(
+      vendorId,
+      'warehouse',
+      warehouseSnapshot.data() as Warehouse,
+      'branch',
+      branchSnapshot.data() as Branch,
+    );
+    productEntries.forEach(([productId, product], index) => {
+      const before = inventorySnapshots[index].exists()
+        ? Number(inventorySnapshots[index].data().quantity)
+        : 0;
+      if (product.quantity <= 0 || before < product.quantity) {
+        throw new Error(`Insufficient warehouse stock to dispatch ${product.productName}.`);
+      }
+      const after = before - product.quantity;
+      transaction.set(inventoryRefs[index], {
+        id: inventoryRefs[index].id,
+        vendorId,
+        warehouseId: transfer.sourceWarehouseId,
+        productId,
+        quantity: after,
+        lastUpdated: now,
+      });
+      const movementId = `dispatch_${transferId}_${productId}`;
+      transaction.set(doc(db, 'vendors', vendorId, 'inventory_movements', movementId), {
+        id: movementId,
+        tenantId: vendorId,
+        vendorId,
+        transferId,
+        entityType: 'WAREHOUSE_TO_BRANCH_TRANSFER',
+        entityId: transferId,
+        movementType: 'transfer_out',
+        locationType: 'warehouse',
+        locationId: transfer.sourceWarehouseId,
+        productId,
+        productName: product.productName,
+        quantityDelta: -product.quantity,
+        quantityBefore: before,
+        quantityAfter: after,
+        sourceDocumentReference: transfer.transferNo,
+        createdAt: now,
+      });
+    });
+    const dispatched: StockTransfer = {
+      ...transfer,
+      items: transfer.items.map(item => ({
+        ...item,
+        quantityDispatched: item.quantityApproved ?? item.quantityRequested ?? item.quantity,
+      })),
+      status: 'IN_TRANSIT',
+      dispatcher,
+      dispatchedAt: now,
+      version: expectedVersion + 1,
+    };
+    transaction.set(transferRef, dispatched);
+    transaction.set(doc(db, 'vendors', vendorId, 'approval_events', `dispatch_${transferId}`), {
+      id: `dispatch_${transferId}`,
+      tenantId: vendorId,
+      vendorId,
+      entityType: 'WAREHOUSE_TO_BRANCH_TRANSFER',
+      entityId: transferId,
+      requester: transfer.requester,
+      approver: dispatcher,
+      requestedAt: transfer.requestedAt,
+      decisionAt: now,
+      outcome: 'IN_TRANSIT',
+      reason: 'Approved transfer dispatched from warehouse.',
+      warehouseId: transfer.sourceWarehouseId,
+      branchId: transfer.targetBranchId,
+      createdAt: now,
+    });
+    return dispatched;
+  });
+  await logBIEvent(
+    vendorId,
+    'INVENTORY_WORKFLOW_TRANSITION',
+    `Transfer ${updated.transferNo} dispatched and marked in transit`,
+    { transferId, status: updated.status, version: updated.version },
+    { staffId: dispatcher.id, staffName: dispatcher.name, staffRole: dispatcher.role },
+  );
+  return updated;
+}
+
+export async function confirmStockTransferReceipt(
+  vendorId: string,
+  transferId: string,
+  receivingOfficer: WorkflowActor,
+  expectedVersion: number,
+  receipts: { lineIndex: number; quantityReceived: number }[],
+  reason: string,
+): Promise<StockTransfer> {
+  if (!canAccessTransferLedger(receivingOfficer.role)) {
+    throw new Error('This role is not authorised to confirm branch transfer receipts.');
+  }
+  const transferRef = doc(db, 'vendors', vendorId, 'transfers', transferId);
+  const now = new Date().toISOString();
+  const updated = await runTransaction(db, async transaction => {
+    const transferSnapshot = await transaction.get(transferRef);
+    if (!transferSnapshot.exists()) throw new Error('Transfer not found.');
+    const transfer = transferSnapshot.data() as StockTransfer;
+    if (transfer.vendorId !== vendorId) throw new Error('Transfer tenant mismatch.');
+    if ((transfer.version || 1) !== expectedVersion) {
+      throw new Error('This transfer changed after it was opened. Refresh and try again.');
+    }
+    const status = String(transfer.status).toUpperCase();
+    if (status !== 'IN_TRANSIT' && status !== 'PARTIALLY_RECEIVED') {
+      throw new Error('Only stock in transit can be received.');
+    }
+    const receiptByLine = new Map(receipts.map(receipt => [receipt.lineIndex, receipt.quantityReceived]));
+    const totalOutstanding = transfer.items.reduce((sum, item) =>
+      sum + Math.max(0, (item.quantityDispatched || 0) - (item.quantityReceived || 0)), 0);
+    const totalReceiving = receipts.reduce((sum, receipt) => sum + receipt.quantityReceived, 0);
+    validateTransferReceipt(receivingOfficer.role, totalReceiving, totalOutstanding, reason);
+
+    const receiptTotals = new Map<string, { productName: string; quantity: number }>();
+    const nextItems = transfer.items.map((item, index) => {
+      const receiving = receiptByLine.get(index) || 0;
+      const outstanding = (item.quantityDispatched || 0) - (item.quantityReceived || 0);
+      if (receiving < 0 || receiving > outstanding) {
+        throw new Error(`Received quantity exceeds stock in transit for ${item.productName}.`);
+      }
+      if (receiving > 0) {
+        const current = receiptTotals.get(item.productId);
+        receiptTotals.set(item.productId, {
+          productName: item.productName,
+          quantity: (current?.quantity || 0) + receiving,
+        });
+      }
+      return { ...item, quantityReceived: (item.quantityReceived || 0) + receiving };
+    });
+    const branchRef = doc(db, 'vendors', vendorId, 'branches', transfer.targetBranchId);
+    const productEntries = [...receiptTotals.entries()];
+    const inventoryRefs = productEntries.map(([productId]) =>
+      doc(db, 'vendors', vendorId, 'branch_inventory', `${vendorId}_${transfer.targetBranchId}_${productId}`),
+    );
+    const [branchSnapshot, inventorySnapshots] = await Promise.all([
+      transaction.get(branchRef),
+      Promise.all(inventoryRefs.map(reference => transaction.get(reference))),
+    ]);
+    if (!branchSnapshot.exists()) throw new Error('Destination branch no longer exists.');
+    const branch = branchSnapshot.data() as Branch;
+    if (branch.vendorId !== vendorId || !canResourceProcessTransactions(branch)) {
+      throw new Error('Destination branch is not active for receiving.');
+    }
+    productEntries.forEach(([productId, product], index) => {
+      const before = inventorySnapshots[index].exists()
+        ? Number(inventorySnapshots[index].data().quantity)
+        : 0;
+      const after = before + product.quantity;
+      transaction.set(inventoryRefs[index], {
+        id: inventoryRefs[index].id,
+        vendorId,
+        branchId: transfer.targetBranchId,
+        productId,
+        quantity: after,
+        lastUpdated: now,
+      });
+      const movementId = `receive_${transferId}_v${expectedVersion}_${productId}`;
+      transaction.set(doc(db, 'vendors', vendorId, 'inventory_movements', movementId), {
+        id: movementId,
+        tenantId: vendorId,
+        vendorId,
+        transferId,
+        entityType: 'WAREHOUSE_TO_BRANCH_TRANSFER',
+        entityId: transferId,
+        movementType: 'transfer_in',
+        locationType: 'branch',
+        locationId: transfer.targetBranchId,
+        productId,
+        productName: product.productName,
+        quantityDelta: product.quantity,
+        quantityBefore: before,
+        quantityAfter: after,
+        sourceDocumentReference: transfer.transferNo,
+        reason,
+        createdAt: now,
+      });
+    });
+    const completed = nextItems.every(item =>
+      (item.quantityReceived || 0) >= (item.quantityDispatched || 0));
+    const received: StockTransfer = {
+      ...transfer,
+      items: nextItems,
+      status: completed ? 'COMPLETED' : 'PARTIALLY_RECEIVED',
+      receivingOfficer,
+      version: expectedVersion + 1,
+    };
+    transaction.set(transferRef, received);
+    const auditId = `receive_${transferId}_v${expectedVersion}`;
+    transaction.set(doc(db, 'vendors', vendorId, 'approval_events', auditId), {
+      id: auditId,
+      tenantId: vendorId,
+      vendorId,
+      entityType: 'WAREHOUSE_TO_BRANCH_TRANSFER',
+      entityId: transferId,
+      requester: transfer.requester,
+      approver: receivingOfficer,
+      requestedAt: transfer.requestedAt,
+      decisionAt: now,
+      outcome: received.status,
+      reason: reason || 'Full transfer receipt confirmed.',
+      warehouseId: transfer.sourceWarehouseId,
+      branchId: transfer.targetBranchId,
+      beforeAndAfterQuantities: nextItems.map((item, index) => ({
+        productId: item.productId,
+        before: transfer.items[index].quantityReceived || 0,
+        after: item.quantityReceived || 0,
+      })),
+      createdAt: now,
+    });
+    return received;
+  });
+  await logBIEvent(
+    vendorId,
+    'INVENTORY_WORKFLOW_TRANSITION',
+    `Transfer ${updated.transferNo} receipt confirmed as ${updated.status}`,
+    { transferId, status: updated.status, version: updated.version, reason },
+    { staffId: receivingOfficer.id, staffName: receivingOfficer.name, staffRole: receivingOfficer.role },
+  );
+  return updated;
+}
+
 // 3. Branch Stock Adjustment Form (for Opening Balance, Recount, Damage, etc.)
 export async function adjustBranchStock(
   vendorId: string,
@@ -796,8 +1451,29 @@ export async function adjustBranchStock(
   branchName: string,
   type: 'opening_balance' | 'recount' | 'damage' | 'return' | 'other',
   items: { productId: string; productName: string; quantityDelta: number; reason?: string }[],
-  notes?: string
-): Promise<StockAdjustment> {
+  notes: string | undefined,
+  requester: WorkflowActor,
+): Promise<ApprovalRequest | StockAdjustment> {
+  await requireActiveOperationalResource(vendorId, 'branch', branchId);
+  if (type === 'opening_balance' || type === 'recount') {
+    const adjustmentId = `adj_${Math.random().toString(36).substring(2, 9)}`;
+    return createApprovalRequest(vendorId, {
+      entityType: type === 'opening_balance' ? 'OPENING_BALANCE_ADJUSTMENT' : 'STOCKTAKE_ADJUSTMENT',
+      entityId: adjustmentId,
+      title: `${type === 'opening_balance' ? 'Opening balance' : 'Stocktake'} adjustment for ${branchName}`,
+      description: `${items.length} inventory adjustment line${items.length === 1 ? '' : 's'} awaiting approval.`,
+      requester,
+      branchId,
+      branchName,
+      dataPayload: {
+        locationType: 'branch',
+        locationId: branchId,
+        locationName: branchName,
+        notes,
+        items,
+      },
+    });
+  }
   const now = new Date().toISOString();
   const adjId = `adj_${Math.random().toString(36).substring(2, 9)}`;
 
@@ -844,6 +1520,30 @@ export async function adjustBranchStock(
   return adjustment;
 }
 
+export async function requestIncompletePurchaseOrderCancellation(
+  vendorId: string,
+  purchaseOrderId: string,
+  requester: WorkflowActor,
+  reason: string,
+): Promise<ApprovalRequest> {
+  const purchaseOrderSnapshot = await getDoc(
+    doc(db, 'vendors', vendorId, 'purchase_orders', purchaseOrderId),
+  );
+  if (!purchaseOrderSnapshot.exists()) throw new Error('Purchase order not found.');
+  const purchaseOrderStatus = String(purchaseOrderSnapshot.data().status || '').toUpperCase();
+  if (purchaseOrderStatus === 'COMPLETED' || purchaseOrderStatus === 'CANCELLED') {
+    throw new Error('Only an incomplete purchase order can be submitted for cancellation.');
+  }
+  return createApprovalRequest(vendorId, {
+    entityType: 'PURCHASE_ORDER_CANCELLATION',
+    entityId: purchaseOrderId,
+    title: `Cancel incomplete purchase order ${purchaseOrderId}`,
+    description: reason,
+    requester,
+    dataPayload: { purchaseOrderId, notes: reason },
+  });
+}
+
 // Fetch Stock Adjustments
 export async function fetchStockAdjustments(vendorId: string): Promise<StockAdjustment[]> {
   try {
@@ -860,47 +1560,91 @@ export async function fetchStockAdjustments(vendorId: string): Promise<StockAdju
 }
 
 // 4. Submit POS Order (Checkout)
-export async function processPOSOrder(vendorId: string, orderData: Omit<Order, 'id' | 'createdAt' | 'status'>): Promise<Order> {
+export async function processPOSOrder(
+  vendorId: string,
+  orderId: string,
+  orderData: Omit<Order, 'id' | 'createdAt' | 'status'>,
+): Promise<SaleCompletionResult> {
   const now = new Date().toISOString();
-  const orderId = `ord_${Math.random().toString(36).substring(2, 9)}`;
+  const result = await completeSaleTransaction(
+    {
+      vendorId,
+      orderId,
+      createdAt: now,
+      orderData,
+    },
+    operation =>
+      runTransaction(db, transaction =>
+        operation({
+          async getOrder(id) {
+            const snapshot = await transaction.get(
+              doc(db, 'vendors', vendorId, 'orders', id),
+            );
+            return snapshot.exists() ? snapshot.data() as Order : null;
+          },
+          async getTerminal(terminalId) {
+            const snapshot = await transaction.get(
+              doc(db, 'vendors', vendorId, 'terminals', terminalId),
+            );
+            return snapshot.exists() ? snapshot.data() as Terminal : null;
+          },
+          async getInventory(branchId, productId) {
+            const inventoryId = `${vendorId}_${branchId}_${productId}`;
+            const snapshot = await transaction.get(
+              doc(db, 'vendors', vendorId, 'branch_inventory', inventoryId),
+            );
+            return snapshot.exists() ? snapshot.data() as BranchInventory : null;
+          },
+          setOrder(order) {
+            transaction.set(
+              doc(db, 'vendors', vendorId, 'orders', order.id),
+              order,
+            );
+          },
+          setInventory(inventory) {
+            transaction.set(
+              doc(db, 'vendors', vendorId, 'branch_inventory', inventory.id),
+              inventory,
+            );
+          },
+          setMovement(movement) {
+            transaction.set(
+              doc(db, 'vendors', vendorId, 'inventory_movements', movement.id),
+              movement,
+            );
+          },
+        }),
+      ),
+  );
 
-  const order: Order = {
-    ...orderData,
-    id: orderId,
-    status: 'completed',
-    createdAt: now,
-  };
-
-  // Decrement Branch Stock for sold items
-  const brStock = await fetchBranchStock(vendorId, orderData.branchId);
-  orderData.items.forEach(item => {
-    const prev = brStock[item.product.id] || 0;
-    brStock[item.product.id] = Math.max(0, prev - item.quantity);
-  });
-
-  try {
-    await setDoc(doc(db, 'vendors', vendorId, 'orders', orderId), order);
-    for (const item of orderData.items) {
-      const brInvId = `${vendorId}_${orderData.branchId}_${item.product.id}`;
-      await setDoc(doc(db, 'vendors', vendorId, 'branch_inventory', brInvId), {
-        id: brInvId,
-        vendorId,
-        branchId: orderData.branchId,
-        productId: item.product.id,
-        quantity: brStock[item.product.id],
-        lastUpdated: now
-      });
-    }
-  } catch (e) {
-    console.warn('Firestore process order error', e);
+  if (!result.success) {
+    return result;
   }
 
-  localStorage.setItem(`${LOCAL_STORAGE_KEY}_br_stock_${vendorId}_${orderData.branchId}`, JSON.stringify(brStock));
-  const existingOrdersRaw = localStorage.getItem(`${LOCAL_STORAGE_KEY}_orders_${vendorId}`);
-  const existingOrders = existingOrdersRaw ? JSON.parse(existingOrdersRaw) : [];
-  localStorage.setItem(`${LOCAL_STORAGE_KEY}_orders_${vendorId}`, JSON.stringify([order, ...existingOrders]));
+  try {
+    if (!result.duplicate) {
+      const stockKey = `${LOCAL_STORAGE_KEY}_br_stock_${vendorId}_${orderData.branchId}`;
+      const stockRaw = localStorage.getItem(stockKey);
+      if (stockRaw) {
+        const stock = JSON.parse(stockRaw) as Record<string, number>;
+        result.movements.forEach(movement => {
+          stock[movement.productId] = movement.quantityAfter;
+        });
+        localStorage.setItem(stockKey, JSON.stringify(stock));
+      }
+    }
 
-  return order;
+    const ordersKey = `${LOCAL_STORAGE_KEY}_orders_${vendorId}`;
+    const existingOrdersRaw = localStorage.getItem(ordersKey);
+    const existingOrders: Order[] = existingOrdersRaw ? JSON.parse(existingOrdersRaw) : [];
+    if (!existingOrders.some(order => order.id === result.order.id)) {
+      localStorage.setItem(ordersKey, JSON.stringify([result.order, ...existingOrders]));
+    }
+  } catch (error) {
+    console.warn('Committed sale local cache update failed:', error);
+  }
+
+  return result;
 }
 
 // Fetch Orders
@@ -1088,195 +1832,737 @@ export async function saveStaffMember(vendorId: string, staffData: Partial<Staff
   return fullStaff;
 }
 
-// Fetch Approval Requests
-export async function fetchApprovalRequests(vendorId: string): Promise<ApprovalRequest[]> {
-  try {
-    const colRef = collection(db, 'vendors', vendorId, 'approval_requests');
-    const snap = await getDocs(colRef);
-    if (!snap.empty) {
-      const list = snap.docs.map(d => d.data() as ApprovalRequest);
-      list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      return list;
-    }
-  } catch (e) {
-    console.warn(e);
-  }
-
-  const raw = localStorage.getItem(`${LOCAL_STORAGE_KEY}_approvals_${vendorId}`);
-  if (raw) return JSON.parse(raw);
-
-  // Return initial demo approval request if clean state
-  const now = new Date().toISOString();
-  const demoRequest: ApprovalRequest = {
-    id: `appr_demo_01`,
-    vendorId,
-    type: 'stock_adjustment',
-    title: 'High-Value Damage Stock Adjustment Approval',
-    description: '3 damaged units of Wireless Bluetooth Barcode Scanner pending verification before inventory reduction.',
-    requesterId: `staff_${vendorId}_cashier`,
-    requesterName: 'Sarah Chen',
-    requesterRole: 'cashier',
-    branchName: 'Main Branch',
-    dataPayload: {
-      branchId: `br_${vendorId}_default`,
-      type: 'damage',
-      items: [{ productId: 'prod_002', productName: 'Wireless Bluetooth Barcode Scanner', quantityDelta: -3, reason: 'Damaged in transit' }]
-    },
-    status: 'pending',
-    createdAt: now,
-  };
-
-  localStorage.setItem(`${LOCAL_STORAGE_KEY}_approvals_${vendorId}`, JSON.stringify([demoRequest]));
-  return [demoRequest];
+function approvalTypeForEntity(entityType: CriticalInventoryEntityType): ApprovalRequestType {
+  if (entityType === 'SUPPLIER_STOCK_RECEIPT') return 'supplier_intake';
+  if (entityType === 'WAREHOUSE_TO_BRANCH_TRANSFER' || entityType === 'BRANCH_TO_BRANCH_TRANSFER') return 'stock_transfer';
+  if (entityType === 'PURCHASE_ORDER_CANCELLATION') return 'purchase_order_cancellation';
+  return 'stock_adjustment';
 }
 
-// Create Approval Request
+export interface InventoryApprovalSubmission {
+  entityType: CriticalInventoryEntityType;
+  entityId: string;
+  title: string;
+  description: string;
+  requester: WorkflowActor;
+  branchId?: string;
+  branchName?: string;
+  warehouseId?: string;
+  warehouseName?: string;
+  dataPayload: ApprovalDataPayload;
+}
+
+export async function fetchInventoryApprovalPolicy(vendorId: string): Promise<InventoryApprovalPolicy> {
+  const policyRef = doc(db, 'vendors', vendorId, 'settings', 'inventory_approval_policy');
+  try {
+    const snapshot = await getDoc(policyRef);
+    if (snapshot.exists()) {
+      return { ...DEFAULT_INVENTORY_APPROVAL_POLICY, ...snapshot.data() } as InventoryApprovalPolicy;
+    }
+  } catch (error) {
+    console.warn('Inventory approval policy fetch failed:', error);
+  }
+  return DEFAULT_INVENTORY_APPROVAL_POLICY;
+}
+
+function auditEventDocument(
+  request: ApprovalRequest,
+  status: InventoryWorkflowStatus,
+  actor: WorkflowActor,
+  timestamp: string,
+  reason: string,
+  quantityDecisions: ApprovalQuantityDecision[] = [],
+) {
+  const decisionStatus = [
+    'APPROVED',
+    'REJECTED',
+    'CANCELLED',
+    'PROCESSING',
+    'COMPLETED',
+    'FAILED',
+  ].includes(status);
+  return {
+    id: `${request.id}_${request.version}_${status}`,
+    tenantId: request.tenantId,
+    vendorId: request.vendorId,
+    entityType: request.entityType,
+    entityId: request.entityId,
+    requestId: request.id,
+    requester: request.requester,
+    actor,
+    approver: decisionStatus ? actor : null,
+    requestedAt: request.requestedAt,
+    decisionAt: timestamp,
+    outcome: status,
+    reason,
+    branchId: request.branchId || null,
+    branchName: request.branchName || null,
+    warehouseId: request.warehouseId || null,
+    warehouseName: request.warehouseName || null,
+    quantityDecisions,
+    version: request.version,
+    timestamp,
+  };
+}
+
+async function logWorkflowTransitions(
+  request: ApprovalRequest,
+  statuses: InventoryWorkflowStatus[],
+  actor: WorkflowActor,
+  reason: string,
+): Promise<void> {
+  for (const status of statuses) {
+    await logBIEvent(
+      request.vendorId,
+      'INVENTORY_WORKFLOW_TRANSITION',
+      `${request.entityType.replaceAll('_', ' ')} ${status}`,
+      {
+        tenantId: request.tenantId,
+        entityType: request.entityType,
+        entityId: request.entityId,
+        requestId: request.id,
+        status,
+        version: request.version,
+        reason,
+        quantityDecisions: request.quantityDecisions || [],
+      },
+      { staffId: actor.id, staffName: actor.name, staffRole: actor.role },
+    );
+  }
+}
+
+function normalizeStoredApproval(
+  vendorId: string,
+  documentId: string,
+  stored: Partial<ApprovalRequest> & {
+    status?: InventoryWorkflowStatus | 'pending' | 'approved' | 'rejected';
+  },
+): ApprovalRequest {
+    const entityType: CriticalInventoryEntityType = stored.entityType ||
+      (stored.type === 'supplier_intake'
+        ? 'SUPPLIER_STOCK_RECEIPT'
+        : stored.type === 'stock_transfer'
+          ? 'WAREHOUSE_TO_BRANCH_TRANSFER'
+          : 'STOCKTAKE_ADJUSTMENT');
+    const statusMap: Record<string, InventoryWorkflowStatus> = {
+      pending: 'PENDING_APPROVAL',
+      approved: 'COMPLETED',
+      rejected: 'REJECTED',
+    };
+    const requester: WorkflowActor = stored.requester || {
+      id: stored.requesterId || 'unknown',
+      name: stored.requesterName || 'Unknown requester',
+      role: stored.requesterRole || 'warehouse_staff',
+    };
+    const createdAt = stored.createdAt || new Date(0).toISOString();
+    return {
+      ...stored,
+      id: stored.id || documentId,
+      tenantId: stored.tenantId || vendorId,
+      vendorId,
+      entityType,
+      entityId: stored.entityId || stored.id || documentId,
+      type: stored.type || approvalTypeForEntity(entityType),
+      title: stored.title || 'Inventory approval',
+      description: stored.description || '',
+      requesterId: requester.id,
+      requesterName: requester.name,
+      requesterRole: requester.role,
+      requester,
+      dataPayload: stored.dataPayload || {},
+      status: statusMap[String(stored.status)] || stored.status || 'PENDING_APPROVAL',
+      version: stored.version || 1,
+      segregationOfDuties: stored.segregationOfDuties ?? true,
+      notificationAudienceRoles: stored.notificationAudienceRoles || INVENTORY_WORKFLOW_POLICIES[entityType].approveRoles,
+      requestedAt: stored.requestedAt || createdAt,
+      createdAt,
+      updatedAt: stored.updatedAt || createdAt,
+    } as ApprovalRequest;
+}
+
+export async function fetchApprovalRequests(vendorId: string): Promise<ApprovalRequest[]> {
+  const colRef = collection(db, 'vendors', vendorId, 'approval_requests');
+  const snap = await getDocs(colRef);
+  const list = snap.docs.map(snapshot =>
+    normalizeStoredApproval(vendorId, snapshot.id, snapshot.data()),
+  );
+  list.sort((a, b) => new Date(b.requestedAt || b.createdAt).getTime() - new Date(a.requestedAt || a.createdAt).getTime());
+  localStorage.setItem(`${LOCAL_STORAGE_KEY}_approvals_${vendorId}`, JSON.stringify(list));
+  return list;
+}
+
 export async function createApprovalRequest(
   vendorId: string,
-  requestData: Omit<ApprovalRequest, 'id' | 'createdAt' | 'status'>
+  submission: InventoryApprovalSubmission,
 ): Promise<ApprovalRequest> {
   const now = new Date().toISOString();
-  const id = `appr_${Math.random().toString(36).substring(2, 9)}`;
-
-  const req: ApprovalRequest = {
-    ...requestData,
+  const policy = await fetchInventoryApprovalPolicy(vendorId);
+  const id = `appr_${crypto.randomUUID()}`;
+  const request = createPendingInventoryRequest({
     id,
-    status: 'pending',
-    createdAt: now,
-  };
-
-  try {
-    await setDoc(doc(db, 'vendors', vendorId, 'approval_requests', id), req);
-  } catch (e) {
-    console.warn(e);
-  }
-
-  const current = await fetchApprovalRequests(vendorId);
-  localStorage.setItem(`${LOCAL_STORAGE_KEY}_approvals_${vendorId}`, JSON.stringify([req, ...current]));
-
-  // Log in BI
-  await logBIEvent(
+    tenantId: vendorId,
     vendorId,
-    'APPROVAL_REQUESTED',
-    `Critical Transaction Approval Requested: ${req.title} by ${req.requesterName} (${req.requesterRole})`,
-    { requestId: req.id, type: req.type, requesterId: req.requesterId },
-    { staffId: req.requesterId, staffName: req.requesterName, staffRole: req.requesterRole }
-  );
+    entityType: submission.entityType,
+    entityId: submission.entityId,
+    type: approvalTypeForEntity(submission.entityType),
+    title: submission.title,
+    description: submission.description,
+    requesterId: submission.requester.id,
+    requesterName: submission.requester.name,
+    requesterRole: submission.requester.role,
+    requester: submission.requester,
+    branchId: submission.branchId,
+    branchName: submission.branchName,
+    warehouseId: submission.warehouseId,
+    warehouseName: submission.warehouseName,
+    dataPayload: submission.dataPayload,
+    segregationOfDuties: policy.segregationOfDuties,
+    notificationAudienceRoles: INVENTORY_WORKFLOW_POLICIES[submission.entityType].approveRoles,
+  }, now);
 
-  return req;
+  await runTransaction(db, async transaction => {
+    transaction.set(doc(db, 'vendors', vendorId, 'approval_requests', id), request);
+    for (const [index, status] of (['DRAFT', 'SUBMITTED', 'PENDING_APPROVAL'] as InventoryWorkflowStatus[]).entries()) {
+      const event = auditEventDocument(
+        { ...request, version: index + 1 },
+        status,
+        submission.requester,
+        now,
+        'Inventory transaction submitted for approval.',
+      );
+      transaction.set(doc(db, 'vendors', vendorId, 'approval_events', event.id), event);
+    }
+  });
+
+  await logWorkflowTransitions(
+    request,
+    ['DRAFT', 'SUBMITTED', 'PENDING_APPROVAL'],
+    submission.requester,
+    'Inventory transaction submitted for approval.',
+  );
+  return request;
 }
 
-// Review (Approve or Reject) Approval Request
+function requirePayloadItems(payload: ApprovalDataPayload) {
+  if (!payload.items || payload.items.length === 0) {
+    throw new Error('The approval request has no inventory items.');
+  }
+  return payload.items;
+}
+
 export async function reviewApprovalRequest(
   vendorId: string,
   requestId: string,
-  status: 'approved' | 'rejected',
-  reviewer: { id: string; name: string; role: StaffRole },
-  comment?: string
-): Promise<ApprovalRequest | null> {
+  decision: 'APPROVED' | 'REJECTED' | 'CANCELLED',
+  reviewer: WorkflowActor,
+  expectedVersion: number,
+  reason = '',
+): Promise<ApprovalRequest> {
   const now = new Date().toISOString();
-  const requests = await fetchApprovalRequests(vendorId);
-  const target = requests.find(r => r.id === requestId);
-  if (!target) return null;
-
-  const updated: ApprovalRequest = {
-    ...target,
-    status,
-    reviewedBy: reviewer.id,
-    reviewedByName: reviewer.name,
-    reviewedAt: now,
-    reviewComment: comment || (status === 'approved' ? 'Approved by Authorized Officer' : 'Rejected by Manager'),
-  };
-
+  const requestRef = doc(db, 'vendors', vendorId, 'approval_requests', requestId);
+  let result: ApprovalRequest;
   try {
-    await setDoc(doc(db, 'vendors', vendorId, 'approval_requests', requestId), updated);
-  } catch (e) {
-    console.warn(e);
-  }
+    result = await runTransaction(db, async transaction => {
+    const snapshot = await transaction.get(requestRef);
+    if (!snapshot.exists()) throw new Error('Approval request not found.');
+    const current = normalizeStoredApproval(vendorId, snapshot.id, snapshot.data());
+    const decided = decideInventoryRequest(
+      current,
+      decision,
+      reviewer,
+      expectedVersion,
+      reason || `${decision.toLowerCase()} by authorised officer`,
+      now,
+    );
 
-  const updatedList = requests.map(r => r.id === requestId ? updated : r);
-  localStorage.setItem(`${LOCAL_STORAGE_KEY}_approvals_${vendorId}`, JSON.stringify(updatedList));
-
-  // If approved and type is stock_adjustment, update warehouse or branch inventory
-  if (status === 'approved' && target.type === 'stock_adjustment' && target.dataPayload) {
-    const payload = target.dataPayload;
-    const locationType = payload.locationType || 'branch';
-    const locationId = payload.locationId || payload.branchId || 'default';
-    const items = payload.items || [];
-
-    if (locationType === 'warehouse') {
-      const whStock = await fetchWarehouseStock(vendorId, locationId);
-      items.forEach((i: any) => {
-        const prev = whStock[i.productId] || 0;
-        whStock[i.productId] = Math.max(0, prev + (i.quantityDelta || 0));
-      });
-      localStorage.setItem(`${LOCAL_STORAGE_KEY}_wh_stock_${vendorId}_${locationId}`, JSON.stringify(whStock));
-      for (const i of items) {
-        const whInvId = `${vendorId}_${locationId}_${i.productId}`;
-        await setDoc(doc(db, 'vendors', vendorId, 'warehouse_inventory', whInvId), {
-          id: whInvId,
-          vendorId,
-          warehouseId: locationId,
-          productId: i.productId,
-          quantity: whStock[i.productId],
-          lastUpdated: now
-        }).catch(e => console.warn(e));
-      }
-    } else {
-      const brStock = await fetchBranchStock(vendorId, locationId);
-      items.forEach((i: any) => {
-        const prev = brStock[i.productId] || 0;
-        brStock[i.productId] = Math.max(0, prev + (i.quantityDelta || 0));
-      });
-      localStorage.setItem(`${LOCAL_STORAGE_KEY}_br_stock_${vendorId}_${locationId}`, JSON.stringify(brStock));
-      for (const i of items) {
-        const brInvId = `${vendorId}_${locationId}_${i.productId}`;
-        await setDoc(doc(db, 'vendors', vendorId, 'branch_inventory', brInvId), {
-          id: brInvId,
-          vendorId,
-          branchId: locationId,
-          productId: i.productId,
-          quantity: brStock[i.productId],
-          lastUpdated: now
-        }).catch(e => console.warn(e));
-      }
+    if (decision !== 'APPROVED') {
+      transaction.set(requestRef, decided);
+      const event = auditEventDocument(decided, decision, reviewer, now, decided.reason || '');
+      transaction.set(doc(db, 'vendors', vendorId, 'approval_events', event.id), event);
+      return decided;
     }
 
-    // Record StockAdjustment history
-    const adjId = `adj_${Math.random().toString(36).substring(2, 9)}`;
-    const adjustment: StockAdjustment = {
-      id: adjId,
-      vendorId,
-      branchId: locationId,
-      branchName: payload.locationName || 'Location Depot',
-      type: 'recount',
-      date: now,
-      items: items.map((i: any) => ({
-        productId: i.productId,
-        productName: i.productName,
-        quantityDelta: i.quantityDelta,
-        unitCost: i.costPrice || 0,
-        reason: i.reason || 'Approved Stocktake Recount'
-      })),
-      notes: `Stocktake audit approved by ${reviewer.name} (${reviewer.role})`,
-      createdAt: now
-    };
+    const processing = markInventoryRequestProcessing(decided, now);
+    const payload = current.dataPayload;
+    const quantityDecisions: ApprovalQuantityDecision[] = [];
 
-    const existingAdjRaw = localStorage.getItem(`${LOCAL_STORAGE_KEY}_adjustments_${vendorId}`);
-    const existingAdj = existingAdjRaw ? JSON.parse(existingAdjRaw) : [];
-    localStorage.setItem(`${LOCAL_STORAGE_KEY}_adjustments_${vendorId}`, JSON.stringify([adjustment, ...existingAdj]));
+    if (current.entityType === 'WAREHOUSE_TO_BRANCH_TRANSFER') {
+      const items = requirePayloadItems(payload);
+      const sourceId = payload.sourceId;
+      const targetBranchId = payload.targetBranchId;
+      if (!sourceId || !targetBranchId) throw new Error('Transfer source and target are required.');
+      const warehouseRef = doc(db, 'vendors', vendorId, 'warehouses', sourceId);
+      const branchRef = doc(db, 'vendors', vendorId, 'branches', targetBranchId);
+      const inventoryRefs = items.map(item =>
+        doc(db, 'vendors', vendorId, 'warehouse_inventory', `${vendorId}_${sourceId}_${item.productId}`),
+      );
+      const [warehouseSnapshot, branchSnapshot, inventorySnapshots] = await Promise.all([
+        transaction.get(warehouseRef),
+        transaction.get(branchRef),
+        Promise.all(inventoryRefs.map(reference => transaction.get(reference))),
+      ]);
+      if (!warehouseSnapshot.exists() || !branchSnapshot.exists()) {
+        throw new Error('Transfer source or destination no longer exists.');
+      }
+      const warehouse = warehouseSnapshot.data() as Warehouse;
+      const branch = branchSnapshot.data() as Branch;
+      assertWarehouseToBranchRoute(vendorId, 'warehouse', warehouse, 'branch', branch);
+      items.forEach((item, index) => {
+        const available = inventorySnapshots[index].exists()
+          ? Number(inventorySnapshots[index].data().quantity)
+          : 0;
+        if ((item.quantity || 0) <= 0 || (item.quantity || 0) > available) {
+          throw new Error(`Insufficient warehouse stock for ${item.productName}.`);
+        }
+      });
+      transaction.set(doc(db, 'vendors', vendorId, 'transfers', current.entityId), {
+        id: current.entityId,
+        vendorId,
+        transferNo: current.entityId,
+        sourceWarehouseId: sourceId,
+        sourceWarehouseName: payload.sourceName || warehouse.name,
+        targetBranchId,
+        targetBranchName: payload.targetBranchName || branch.name,
+        date: now,
+        items: items.map(item => ({
+          ...item,
+          quantity: item.quantity || 0,
+          quantityRequested: item.quantity || 0,
+          quantityApproved: item.quantity || 0,
+          quantityDispatched: 0,
+          quantityReceived: 0,
+        })),
+        status: 'APPROVED',
+        version: 1,
+        notes: payload.notes || '',
+        requestedAt: current.requestedAt,
+        approvedAt: decided.decisionAt,
+        requester: current.requester,
+        approver: reviewer,
+        barcodeReference: current.entityId,
+        createdAt: current.requestedAt,
+      });
+      const completedApproval = {
+        ...markInventoryRequestCompleted(processing, now),
+        quantityDecisions,
+      };
+      transaction.set(requestRef, completedApproval);
+      for (const state of [decided, processing, completedApproval]) {
+        const event = auditEventDocument(
+          state,
+          state.status,
+          reviewer,
+          now,
+          state.reason || reason,
+          quantityDecisions,
+        );
+        transaction.set(doc(db, 'vendors', vendorId, 'approval_events', event.id), event);
+      }
+      return completedApproval;
+    }
+
+    if (
+      current.entityType === 'BRANCH_TO_BRANCH_TRANSFER'
+    ) {
+      const items = requirePayloadItems(payload);
+      const sourceId = payload.sourceId;
+      const targetBranchId = payload.targetBranchId;
+      if (!sourceId || !targetBranchId) throw new Error('Transfer source and target are required.');
+      if (sourceId === targetBranchId) {
+        throw new Error('Source and destination branches must be different.');
+      }
+      const sourceCollection = 'branch_inventory';
+      const sourceResourceRef = doc(
+        db,
+        'vendors',
+        vendorId,
+        'branches',
+        sourceId,
+      );
+      const targetBranchRef = doc(db, 'vendors', vendorId, 'branches', targetBranchId);
+      const sourceRefs = items.map(item =>
+        doc(db, 'vendors', vendorId, sourceCollection, `${vendorId}_${sourceId}_${item.productId}`),
+      );
+      const targetRefs = items.map(item =>
+        doc(db, 'vendors', vendorId, 'branch_inventory', `${vendorId}_${targetBranchId}_${item.productId}`),
+      );
+      const [sourceResourceSnapshot, targetBranchSnapshot, sourceSnapshots, targetSnapshots] = await Promise.all([
+        transaction.get(sourceResourceRef),
+        transaction.get(targetBranchRef),
+        Promise.all(sourceRefs.map(reference => transaction.get(reference))),
+        Promise.all(targetRefs.map(reference => transaction.get(reference))),
+      ]);
+      if (
+        !sourceResourceSnapshot.exists() ||
+        !targetBranchSnapshot.exists() ||
+        !canResourceProcessTransactions(sourceResourceSnapshot.data() as Warehouse | Branch) ||
+        !canResourceProcessTransactions(targetBranchSnapshot.data() as Branch)
+      ) {
+        throw new Error('The transfer source and destination must both be active licensed resources.');
+      }
+
+      items.forEach((item, index) => {
+        const quantity = item.quantity || 0;
+        const sourceBefore = sourceSnapshots[index].exists() ? Number(sourceSnapshots[index].data().quantity) : 0;
+        const targetBefore = targetSnapshots[index].exists() ? Number(targetSnapshots[index].data().quantity) : 0;
+        if (quantity <= 0 || sourceBefore < quantity) {
+          throw new Error(`Insufficient approved source stock for ${item.productName}.`);
+        }
+        const sourceAfter = sourceBefore - quantity;
+        const targetAfter = targetBefore + quantity;
+        transaction.set(sourceRefs[index], {
+          id: sourceRefs[index].id,
+          vendorId,
+          branchId: sourceId,
+          productId: item.productId,
+          quantity: sourceAfter,
+          lastUpdated: now,
+        });
+        transaction.set(targetRefs[index], {
+          id: targetRefs[index].id,
+          vendorId,
+          branchId: targetBranchId,
+          productId: item.productId,
+          quantity: targetAfter,
+          lastUpdated: now,
+        });
+        quantityDecisions.push(
+          {
+            productId: item.productId,
+            productName: item.productName,
+            locationType: 'branch',
+            locationId: sourceId,
+            beforeQuantity: sourceBefore,
+            quantityDelta: -quantity,
+            afterQuantity: sourceAfter,
+          },
+          {
+            productId: item.productId,
+            productName: item.productName,
+            locationType: 'branch',
+            locationId: targetBranchId,
+            beforeQuantity: targetBefore,
+            quantityDelta: quantity,
+            afterQuantity: targetAfter,
+          },
+        );
+      });
+
+      transaction.set(doc(db, 'vendors', vendorId, 'transfers', current.entityId), {
+        id: current.entityId,
+        vendorId,
+        transferNo: current.entityId,
+        sourceWarehouseId: '',
+        sourceWarehouseName: '',
+        sourceBranchId: payload.sourceId,
+        sourceBranchName: payload.sourceName,
+        targetBranchId,
+        targetBranchName: payload.targetBranchName || '',
+        date: now,
+        items: items.map(item => ({
+          ...item,
+          quantityReceived: item.quantity || 0,
+        })),
+        status: 'COMPLETED',
+        notes: payload.notes || '',
+        requestedAt: current.requestedAt,
+        approvedAt: decided.decisionAt,
+        dispatchedAt: now,
+        requester: current.requester,
+        approver: reviewer,
+        barcodeReference: current.entityId,
+        createdAt: current.requestedAt,
+      });
+    } else if (current.entityType === 'SUPPLIER_STOCK_RECEIPT') {
+      const items = requirePayloadItems(payload);
+      const warehouseId = current.warehouseId || payload.locationId;
+      if (!warehouseId) throw new Error('Receipt warehouse is required.');
+      if (payload.locationType !== 'warehouse' || current.branchId) {
+        throw new Error('Direct supplier receipt into a branch is not permitted.');
+      }
+      const warehouseRef = doc(db, 'vendors', vendorId, 'warehouses', warehouseId);
+      const productTotals = new Map<string, { productName: string; quantity: number }>();
+      const receiptKeys = new Set<string>();
+      items.forEach(item => {
+        const receiptKey = [
+          item.productId,
+          item.batchNumber?.trim().toLowerCase() || '',
+          item.unitOfMeasure?.trim().toLowerCase() || 'unit',
+        ].join('|');
+        if (receiptKeys.has(receiptKey)) {
+          throw new Error(`Duplicate receipt line for ${item.productName}, batch and unit.`);
+        }
+        receiptKeys.add(receiptKey);
+        const quantity = item.quantity || 0;
+        const total = productTotals.get(item.productId);
+        productTotals.set(item.productId, {
+          productName: item.productName,
+          quantity: (total?.quantity || 0) + quantity,
+        });
+      });
+      const productEntries = [...productTotals.entries()];
+      const inventoryRefs = productEntries.map(([productId]) =>
+        doc(db, 'vendors', vendorId, 'warehouse_inventory', `${vendorId}_${warehouseId}_${productId}`),
+      );
+      const purchaseOrderRef = payload.purchaseOrderId
+        ? doc(db, 'vendors', vendorId, 'purchase_orders', payload.purchaseOrderId)
+        : null;
+      const [warehouseSnapshot, inventorySnapshots, purchaseOrderSnapshot] = await Promise.all([
+        transaction.get(warehouseRef),
+        Promise.all(inventoryRefs.map(reference => transaction.get(reference))),
+        purchaseOrderRef ? transaction.get(purchaseOrderRef) : Promise.resolve(null),
+      ]);
+      if (!warehouseSnapshot.exists() || !canResourceProcessTransactions(warehouseSnapshot.data() as Warehouse)) {
+        throw new Error('The supplier receipt warehouse is not active and licensed.');
+      }
+      if (purchaseOrderRef) {
+        if (!purchaseOrderSnapshot?.exists()) throw new Error('The selected purchase order no longer exists.');
+        const purchaseOrder = normalizePurchaseOrder(
+          vendorId,
+          purchaseOrderSnapshot.id,
+          purchaseOrderSnapshot.data() as Record<string, unknown>,
+        );
+        if (purchaseOrder.status !== 'OPEN' && purchaseOrder.status !== 'PARTIALLY_RECEIVED') {
+          throw new Error(`Purchase order ${purchaseOrder.orderNumber} is no longer open for receiving.`);
+        }
+        if (payload.supplierId && purchaseOrder.supplierId !== payload.supplierId) {
+          throw new Error('The selected purchase order does not belong to this supplier.');
+        }
+        const receiptByProduct = new Map(productEntries);
+        const updatedItems = purchaseOrder.items.map(item => {
+          const receiptQuantity = receiptByProduct.get(item.productId)?.quantity || 0;
+          receiptByProduct.delete(item.productId);
+          const receivedQuantity = item.receivedQuantity + receiptQuantity;
+          if (
+            receivedQuantity > item.orderedQuantity &&
+            !(
+              payload.overReceiptExceptionRequested === true &&
+              Boolean(payload.overReceiptReason?.trim()) &&
+              (reviewer.role === 'sysadmin' || reviewer.role === 'manager')
+            )
+          ) {
+            throw new Error(`Over-receipt is not approved for ${item.productName}.`);
+          }
+          return { ...item, receivedQuantity };
+        });
+        if (receiptByProduct.size > 0 && !(
+          payload.overReceiptExceptionRequested === true &&
+          Boolean(payload.overReceiptReason?.trim()) &&
+          (reviewer.role === 'sysadmin' || reviewer.role === 'manager')
+        )) {
+          throw new Error('The receipt contains a product that is not on the selected purchase order.');
+        }
+        const status = nextPurchaseOrderStatus(updatedItems);
+        transaction.set(purchaseOrderRef, {
+          ...purchaseOrder,
+          items: updatedItems,
+          status,
+          updatedAt: now,
+          ...(status === 'COMPLETED' ? { completedAt: now } : {}),
+        });
+      }
+      productEntries.forEach(([productId, product], index) => {
+        const before = inventorySnapshots[index].exists() ? Number(inventorySnapshots[index].data().quantity) : 0;
+        const quantity = product.quantity;
+        if (quantity <= 0) throw new Error(`Receipt quantity must be positive for ${product.productName}.`);
+        const after = before + quantity;
+        transaction.set(inventoryRefs[index], {
+          id: inventoryRefs[index].id,
+          vendorId,
+          warehouseId,
+          productId,
+          quantity: after,
+          lastUpdated: now,
+        });
+        quantityDecisions.push({
+          productId,
+          productName: product.productName,
+          locationType: 'warehouse',
+          locationId: warehouseId,
+          beforeQuantity: before,
+          quantityDelta: quantity,
+          afterQuantity: after,
+        });
+      });
+      transaction.set(doc(db, 'vendors', vendorId, 'supplier_receipts', current.entityId), {
+        id: current.entityId,
+        vendorId,
+        warehouseId,
+        supplierName: payload.supplierName || '',
+        referenceNo: payload.referenceNo || current.entityId,
+        purchaseOrderId: payload.purchaseOrderId,
+        purchaseOrderNumber: payload.purchaseOrderNumber,
+        date: now,
+        items: items.map(item => ({
+          ...item,
+          quantity: item.quantity || 0,
+          unitCost: item.unitCost || 0,
+          totalCost: (item.quantity || 0) * (item.unitCost || 0),
+        })),
+        totalAmount: items.reduce((sum, item) => sum + (item.quantity || 0) * (item.unitCost || 0), 0),
+        notes: payload.notes || '',
+        createdBy: current.requesterName,
+        status: 'COMPLETED',
+        createdAt: current.requestedAt,
+      });
+    } else if (
+      current.entityType === 'OPENING_BALANCE_ADJUSTMENT' ||
+      current.entityType === 'STOCKTAKE_ADJUSTMENT'
+    ) {
+      const items = requirePayloadItems(payload);
+      const locationType = payload.locationType || 'branch';
+      const locationId = payload.locationId;
+      if (!locationId) throw new Error('Adjustment location is required.');
+      const inventoryCollection = locationType === 'warehouse' ? 'warehouse_inventory' : 'branch_inventory';
+      const locationRef = doc(
+        db,
+        'vendors',
+        vendorId,
+        locationType === 'warehouse' ? 'warehouses' : 'branches',
+        locationId,
+      );
+      const inventoryRefs = items.map(item =>
+        doc(db, 'vendors', vendorId, inventoryCollection, `${vendorId}_${locationId}_${item.productId}`),
+      );
+      const [locationSnapshot, inventorySnapshots] = await Promise.all([
+        transaction.get(locationRef),
+        Promise.all(inventoryRefs.map(reference => transaction.get(reference))),
+      ]);
+      if (
+        !locationSnapshot.exists() ||
+        !canResourceProcessTransactions(locationSnapshot.data() as Warehouse | Branch)
+      ) {
+        throw new Error('The adjustment location is not active and licensed.');
+      }
+      items.forEach((item, index) => {
+        const before = inventorySnapshots[index].exists() ? Number(inventorySnapshots[index].data().quantity) : 0;
+        const delta = item.quantityDelta || 0;
+        const after = before + delta;
+        if (delta === 0 || after < 0) throw new Error(`Invalid approved adjustment for ${item.productName}.`);
+        transaction.set(inventoryRefs[index], {
+          id: inventoryRefs[index].id,
+          vendorId,
+          ...(locationType === 'warehouse' ? { warehouseId: locationId } : { branchId: locationId }),
+          productId: item.productId,
+          quantity: after,
+          lastUpdated: now,
+        });
+        quantityDecisions.push({
+          productId: item.productId,
+          productName: item.productName,
+          locationType,
+          locationId,
+          beforeQuantity: before,
+          quantityDelta: delta,
+          afterQuantity: after,
+        });
+      });
+      transaction.set(doc(db, 'vendors', vendorId, 'adjustments', current.entityId), {
+        id: current.entityId,
+        vendorId,
+        branchId: locationType === 'branch' ? locationId : '',
+        branchName: payload.locationName || '',
+        type: current.entityType === 'OPENING_BALANCE_ADJUSTMENT' ? 'opening_balance' : 'recount',
+        date: now,
+        items,
+        notes: payload.notes || '',
+        status: 'COMPLETED',
+        createdAt: current.requestedAt,
+      });
+    } else if (current.entityType === 'PURCHASE_ORDER_CANCELLATION') {
+      const purchaseOrderId = payload.purchaseOrderId || current.entityId;
+      const purchaseOrderRef = doc(db, 'vendors', vendorId, 'purchase_orders', purchaseOrderId);
+      const purchaseOrderSnapshot = await transaction.get(purchaseOrderRef);
+      if (!purchaseOrderSnapshot.exists()) throw new Error('Purchase order not found.');
+      const purchaseOrderStatus = String(purchaseOrderSnapshot.data().status || '').toUpperCase();
+      if (purchaseOrderStatus === 'COMPLETED' || purchaseOrderStatus === 'CANCELLED') {
+        throw new Error('Only an incomplete purchase order can be cancelled.');
+      }
+      transaction.set(purchaseOrderRef, {
+        status: 'CANCELLED',
+        cancelledAt: now,
+        cancelledBy: reviewer,
+        cancellationReason: reason,
+      }, { merge: true });
+    }
+
+    const completed = {
+      ...markInventoryRequestCompleted(processing, now),
+      quantityDecisions,
+    };
+    transaction.set(requestRef, completed);
+    for (const state of [decided, processing, completed]) {
+      const event = auditEventDocument(
+        state,
+        state.status,
+        reviewer,
+        now,
+        state.reason || reason,
+        quantityDecisions,
+      );
+      transaction.set(doc(db, 'vendors', vendorId, 'approval_events', event.id), event);
+    }
+    quantityDecisions.forEach((quantity, index) => {
+      const movementId = `${requestId}_${index}`;
+      transaction.set(doc(db, 'vendors', vendorId, 'inventory_movements', movementId), {
+        id: movementId,
+        tenantId: vendorId,
+        vendorId,
+        requestId,
+        entityType: current.entityType,
+        entityId: current.entityId,
+        movementType:
+          current.entityType === 'SUPPLIER_STOCK_RECEIPT'
+            ? 'receipt'
+            : current.entityType === 'WAREHOUSE_TO_BRANCH_TRANSFER' ||
+                current.entityType === 'BRANCH_TO_BRANCH_TRANSFER'
+              ? quantity.quantityDelta < 0 ? 'transfer_out' : 'transfer_in'
+              : 'adjustment',
+        quantityBefore: quantity.beforeQuantity,
+        quantityAfter: quantity.afterQuantity,
+        sourceDocumentReference: current.dataPayload.referenceNo || current.entityId,
+        ...quantity,
+        createdAt: now,
+      });
+    });
+    return completed;
+    });
+  } catch (error) {
+    if (error instanceof InventoryWorkflowError) throw error;
+    const failureReason = error instanceof Error ? error.message : 'Atomic inventory processing failed.';
+    const failed = await runTransaction(db, async transaction => {
+      const snapshot = await transaction.get(requestRef);
+      if (!snapshot.exists()) throw error;
+      const current = normalizeStoredApproval(vendorId, snapshot.id, snapshot.data());
+      if (current.status !== 'PENDING_APPROVAL' || current.version !== expectedVersion) throw error;
+      const failedRequest: ApprovalRequest = {
+        ...current,
+        status: 'FAILED',
+        version: current.version + 1,
+        approver: reviewer,
+        reviewedBy: reviewer.id,
+        reviewedByName: reviewer.name,
+        reviewedAt: now,
+        reviewComment: failureReason,
+        decisionAt: now,
+        outcome: 'FAILED',
+        reason: failureReason,
+        updatedAt: now,
+      };
+      transaction.set(requestRef, failedRequest);
+      const event = auditEventDocument(failedRequest, 'FAILED', reviewer, now, failureReason);
+      transaction.set(doc(db, 'vendors', vendorId, 'approval_events', event.id), event);
+      return failedRequest;
+    });
+    await logWorkflowTransitions(failed, ['FAILED'], reviewer, failureReason);
+    throw error;
   }
 
-  // Log in BI Engine
-  await logBIEvent(
-    vendorId,
-    'APPROVAL_DECISION',
-    `Approval ${status.toUpperCase()}: ${target.title} by ${reviewer.name} (${reviewer.role})`,
-    { requestId, status, reviewerId: reviewer.id, comment },
-    { staffId: reviewer.id, staffName: reviewer.name, staffRole: reviewer.role }
-  );
-
-  return updated;
+  const statuses: InventoryWorkflowStatus[] = decision === 'APPROVED'
+    ? ['APPROVED', 'PROCESSING', 'COMPLETED']
+    : [decision];
+  await logWorkflowTransitions(result, statuses, reviewer, result.reason || reason);
+  return result;
 }
 
 // Update Vendor Profile Settings
@@ -1819,7 +3105,9 @@ export const DEFAULT_BILLING_PLANS: BillingPlan[] = [
       'Offline Sale Syncing',
       'Daily Sales Reports'
     ],
+    maxWarehouses: 1,
     maxBranches: 1,
+    maxTerminals: 2,
     maxStaff: 3,
     status: 'active',
     createdAt: new Date().toISOString()
@@ -1839,7 +3127,9 @@ export const DEFAULT_BILLING_PLANS: BillingPlan[] = [
       'Manager Approval Workflows & BI Audit',
       '7-Day Advance Auto-Invoice Generation'
     ],
+    maxWarehouses: 1,
     maxBranches: 3,
+    maxTerminals: 999,
     maxStaff: 10,
     isPopular: true,
     status: 'active',
@@ -1860,7 +3150,9 @@ export const DEFAULT_BILLING_PLANS: BillingPlan[] = [
       'Quarterly Onsite Stocktake Audit Discount',
       'Dedicated Account Manager & SLA'
     ],
+    maxWarehouses: 999,
     maxBranches: 20,
+    maxTerminals: 999,
     maxStaff: 100,
     status: 'active',
     createdAt: new Date().toISOString()
@@ -1989,22 +3281,22 @@ export async function fetchVendorSubscription(vendorId: string): Promise<VendorS
     return JSON.parse(raw);
   }
 
-  // Default initial subscription (Set expiry date 5 days from now to showcase the 7-day advance auto-invoice generation)
+  // Every vendor starts on the minimum Starter entitlement.
   const now = new Date();
   const expiry = new Date();
-  expiry.setDate(now.getDate() + 5); // 5 days remaining -> triggers 7-day auto-invoice rule
+  expiry.setFullYear(now.getFullYear() + 10);
 
   const defaultSub: VendorSubscription = {
     id: `sub_${vendorId}`,
     vendorId,
-    planId: 'pro_commerce',
-    planName: 'Pro Commerce & Multi-Terminal',
-    priceMonthly: 49,
+    planId: 'starter_free',
+    planName: 'Starter POS (Free)',
+    priceMonthly: 0,
     billingPeriodMonths: 1,
-    startDate: new Date(now.getTime() - 25 * 24 * 60 * 60 * 1000).toISOString(),
+    startDate: now.toISOString(),
     expiryDate: expiry.toISOString(),
     autoRenew: true,
-    status: 'expiring_soon'
+    status: 'active',
   };
 
   localStorage.setItem(localKey, JSON.stringify(defaultSub));
@@ -3092,5 +4384,3 @@ export async function logCollectionActivity(
 
   return newActivity;
 }
-
-

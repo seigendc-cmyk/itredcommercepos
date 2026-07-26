@@ -2,12 +2,19 @@ import React, { useState } from 'react';
 import { signInWithPopup } from 'firebase/auth';
 import { auth, googleProvider } from '../lib/firebase';
 import { Shield, Sparkles, Building2, Store, ArrowRight, CheckCircle2 } from 'lucide-react';
+import { AuthIdentity, getAuthErrorMessage } from '../auth/authPolicy';
 
 interface AuthViewProps {
-  onAuthSuccess: (user: { uid: string; email: string }) => void;
+  sessionError?: string;
+  demoLoginEnabled: boolean;
+  onDemoSignIn: (user: AuthIdentity) => void;
 }
 
-export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess }) => {
+export const AuthView: React.FC<AuthViewProps> = ({
+  sessionError,
+  demoLoginEnabled,
+  onDemoSignIn,
+}) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -15,30 +22,19 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess }) => {
     setLoading(true);
     setError('');
     try {
-      const result = await signInWithPopup(auth, googleProvider);
-      if (result.user) {
-        onAuthSuccess({
-          uid: result.user.uid,
-          email: result.user.email || 'vendor@itredpos.com'
-        });
-      }
-    } catch (err: any) {
-      console.warn('Google Popup auth notice (using Google email simulation fallback):', err);
-      // Fallback for sandboxed iframe environments where popups might be blocked
-      const simulatedEmail = 'seigendc@gmail.com';
-      const simulatedUid = 'usr_' + btoa(simulatedEmail).replace(/=/g, '');
-      onAuthSuccess({
-        uid: simulatedUid,
-        email: simulatedEmail
-      });
+      await signInWithPopup(auth, googleProvider);
+    } catch (err: unknown) {
+      console.warn('Google authentication failed:', err);
+      setError(getAuthErrorMessage(err));
     } finally {
       setLoading(false);
     }
   };
 
   const handleDemoSignIn = (email: string) => {
+    if (!demoLoginEnabled) return;
     const uid = 'usr_' + btoa(email).replace(/=/g, '');
-    onAuthSuccess({ uid, email });
+    onDemoSignIn({ uid, email });
   };
 
   return (
@@ -70,9 +66,9 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess }) => {
             </p>
           </div>
 
-          {error && (
+          {(error || sessionError) && (
             <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl text-center font-medium">
-              {error}
+              {error || sessionError}
             </div>
           )}
 
@@ -104,38 +100,39 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess }) => {
             <span>{loading ? 'Authenticating Google Email...' : 'Continue with Google Account'}</span>
           </button>
 
-          {/* Quick Testing Options */}
-          <div className="pt-4 border-t border-slate-100 space-y-3">
-            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider text-center">
-              Quick Test Persona Sign-In
-            </p>
-            
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => handleDemoSignIn('new.vendor@itredcommerce.com')}
-                className="p-3 bg-orange-50 hover:bg-orange-100/80 text-orange-950 border border-orange-200 rounded-xl text-xs font-bold text-left transition-colors flex items-center justify-between group cursor-pointer"
-              >
-                <div>
-                  <p className="text-slate-900 font-bold">New Vendor</p>
-                  <p className="text-[10px] text-slate-600">Triggers Onboarding</p>
-                </div>
-                <ArrowRight className="w-4 h-4 text-[#FF6600] group-hover:translate-x-0.5 transition-transform" />
-              </button>
+          {demoLoginEnabled && (
+            <div className="pt-4 border-t border-slate-100 space-y-3">
+              <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider text-center">
+                Development Test Persona Sign-In
+              </p>
 
-              <button
-                type="button"
-                onClick={() => handleDemoSignIn('seigendc@gmail.com')}
-                className="p-3 bg-slate-50 hover:bg-slate-100 text-slate-900 border border-slate-200 rounded-xl text-xs font-bold text-left transition-colors flex items-center justify-between group cursor-pointer"
-              >
-                <div>
-                  <p className="text-slate-900 font-bold">Returning Vendor</p>
-                  <p className="text-[10px] text-slate-600">Opens POS Dashboard</p>
-                </div>
-                <ArrowRight className="w-4 h-4 text-[#1F242D] group-hover:translate-x-0.5 transition-transform" />
-              </button>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleDemoSignIn('new.vendor@itredcommerce.com')}
+                  className="p-3 bg-orange-50 hover:bg-orange-100/80 text-orange-950 border border-orange-200 rounded-xl text-xs font-bold text-left transition-colors flex items-center justify-between group cursor-pointer"
+                >
+                  <div>
+                    <p className="text-slate-900 font-bold">New Vendor</p>
+                    <p className="text-[10px] text-slate-600">Triggers Onboarding</p>
+                  </div>
+                  <ArrowRight className="w-4 h-4 text-[#FF6600] group-hover:translate-x-0.5 transition-transform" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleDemoSignIn('seigendc@gmail.com')}
+                  className="p-3 bg-slate-50 hover:bg-slate-100 text-slate-900 border border-slate-200 rounded-xl text-xs font-bold text-left transition-colors flex items-center justify-between group cursor-pointer"
+                >
+                  <div>
+                    <p className="text-slate-900 font-bold">Returning Vendor</p>
+                    <p className="text-[10px] text-slate-600">Uses Local Development Data</p>
+                  </div>
+                  <ArrowRight className="w-4 h-4 text-[#1F242D] group-hover:translate-x-0.5 transition-transform" />
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
         </div>
 
