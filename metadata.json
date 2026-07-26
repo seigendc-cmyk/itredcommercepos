@@ -1,0 +1,6 @@
+{
+  "name": "iTred Commerce POS",
+  "description": "Multi-tenant Point of Sale system with central warehouse stock transfers, branch management, and inventory stock adjustments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
