@@ -1,8 +1,20 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { AlertCircle, PackageCheck, Search, Trash2, Truck } from 'lucide-react';
 import { Modal } from '../Common/Modal';
-import { Warehouse, Product } from '../../types';
-import { receiveSupplierStock } from '../../services/db';
-import { Plus, Trash2, AlertCircle, PackageCheck, Truck } from 'lucide-react';
+import { Product, PurchaseOrder, StaffMember, Supplier, Warehouse } from '../../types';
+import {
+  fetchSupplierPurchaseOrders,
+  fetchSuppliers,
+  receiveSupplierStock,
+} from '../../services/db';
+import {
+  assertReceiptAllowed,
+  compareReceiptToPurchaseOrder,
+  mergeReceiptLine,
+  ReceiptDraftLine,
+  searchReceivingProducts,
+} from '../../services/supplierReceiving';
+import { ProductLedgerModal } from './ProductLedgerModal';
 
 interface ReceiveSupplierStockModalProps {
   isOpen: boolean;
@@ -10,6 +22,8 @@ interface ReceiveSupplierStockModalProps {
   vendorId: string;
   warehouses: Warehouse[];
   products: Product[];
+  warehouseStock: Record<string, number>;
+  activeStaff: StaffMember;
   onSuccess: () => void;
 }
 
@@ -19,303 +33,346 @@ export const ReceiveSupplierStockModal: React.FC<ReceiveSupplierStockModalProps>
   vendorId,
   warehouses,
   products,
-  onSuccess
+  warehouseStock,
+  activeStaff,
+  onSuccess,
 }) => {
-  const defaultWarehouse = warehouses.find(w => w.isDefault) || warehouses[0];
-  const [warehouseId, setWarehouseId] = useState(defaultWarehouse?.id || '');
-  const [supplierName, setSupplierName] = useState('');
+  const activeWarehouses = warehouses.filter(warehouse =>
+    warehouse.status !== 'archived' &&
+    warehouse.status !== 'suspended' &&
+    warehouse.licenseStatus !== 'unlicensed',
+  );
+  const defaultWarehouse = activeWarehouses.find(warehouse => warehouse.isDefault) || activeWarehouses[0];
+  const [warehouseId, setWarehouseId] = useState('');
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [supplierId, setSupplierId] = useState('');
+  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
+  const [purchaseOrderId, setPurchaseOrderId] = useState('');
   const [referenceNo, setReferenceNo] = useState('');
   const [notes, setNotes] = useState('');
-  
-  const [lineItems, setLineItems] = useState<{
-    productId: string;
-    quantity: number;
-    unitCost: number;
-  }>([
-    { productId: products[0]?.id || '', quantity: 50, unitCost: products[0]?.costPrice || 10 }
-  ]);
-
+  const [searchTerm, setSearchTerm] = useState('');
+  const [highlightedResult, setHighlightedResult] = useState(0);
+  const [lineItems, setLineItems] = useState<ReceiptDraftLine[]>([]);
+  const [exceptionRequested, setExceptionRequested] = useState(false);
+  const [exceptionReason, setExceptionReason] = useState('');
+  const [ledgerProduct, setLedgerProduct] = useState<Product | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [loadingSuppliers, setLoadingSuppliers] = useState(false);
+  const [loadingOrders, setLoadingOrders] = useState(false);
   const [error, setError] = useState('');
 
-  const handleAddLine = () => {
-    const firstUnused = products.find(p => !lineItems.some(item => item.productId === p.id)) || products[0];
-    if (firstUnused) {
-      setLineItems([
-        ...lineItems,
-        { productId: firstUnused.id, quantity: 10, unitCost: firstUnused.costPrice }
-      ]);
-    }
-  };
-
-  const handleRemoveLine = (index: number) => {
-    if (lineItems.length > 1) {
-      setLineItems(lineItems.filter((_, i) => i !== index));
-    }
-  };
-
-  const handleProductChange = (index: number, pId: string) => {
-    const prod = products.find(p => p.id === pId);
-    const updated = [...lineItems];
-    updated[index].productId = pId;
-    if (prod) {
-      updated[index].unitCost = prod.costPrice;
-    }
-    setLineItems(updated);
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!supplierName.trim()) {
-      setError('Please enter the Supplier Name.');
-      return;
-    }
-
-    const validItems = lineItems.filter(i => i.productId && i.quantity > 0);
-    if (validItems.length === 0) {
-      setError('Please add at least one product with quantity > 0.');
-      return;
-    }
-
-    setIsSubmitting(true);
+  useEffect(() => {
+    if (!isOpen) return;
+    setWarehouseId(current => current || defaultWarehouse?.id || '');
+    setLoadingSuppliers(true);
     setError('');
+    void fetchSuppliers(vendorId)
+      .then(loaded => {
+        setSuppliers(loaded);
+        setSupplierId(current => current || loaded[0]?.id || '');
+      })
+      .catch((reason: unknown) => {
+        setError(reason instanceof Error ? reason.message : 'Unable to load suppliers.');
+      })
+      .finally(() => setLoadingSuppliers(false));
+  }, [defaultWarehouse?.id, isOpen, vendorId]);
 
+  useEffect(() => {
+    if (!isOpen || !supplierId) {
+      setPurchaseOrders([]);
+      setPurchaseOrderId('');
+      return;
+    }
+    setLoadingOrders(true);
+    setPurchaseOrderId('');
+    setLineItems([]);
+    void fetchSupplierPurchaseOrders(vendorId, supplierId)
+      .then(setPurchaseOrders)
+      .catch((reason: unknown) => {
+        setError(reason instanceof Error ? reason.message : 'Unable to load supplier purchase orders.');
+      })
+      .finally(() => setLoadingOrders(false));
+  }, [isOpen, supplierId, vendorId]);
+
+  const selectedSupplier = suppliers.find(supplier => supplier.id === supplierId);
+  const selectedPurchaseOrder = purchaseOrders.find(order => order.id === purchaseOrderId);
+  const searchResults = useMemo(
+    () => searchReceivingProducts(products, searchTerm).slice(0, 8),
+    [products, searchTerm],
+  );
+  const comparisons = useMemo(
+    () => compareReceiptToPurchaseOrder(lineItems, selectedPurchaseOrder),
+    [lineItems, selectedPurchaseOrder],
+  );
+  const hasOverReceipt = comparisons.some(line => line.status === 'OVER_RECEIPT');
+  const grandTotal = lineItems.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
+
+  const addProduct = (product: Product) => {
+    const poItem = selectedPurchaseOrder?.items.find(item => item.productId === product.id);
+    const outstanding = poItem
+      ? Math.max(0, poItem.orderedQuantity - poItem.receivedQuantity)
+      : 0;
+    const incoming: ReceiptDraftLine = {
+      productId: product.id,
+      productName: product.name,
+      sku: product.sku,
+      quantity: outstanding > 0 ? outstanding : 1,
+      unitCost: poItem?.unitCost ?? product.costPrice,
+      unitOfMeasure: poItem?.unitOfMeasure || product.unit,
+      batchNumber: poItem?.batchNumber,
+      orderedQuantity: poItem?.orderedQuantity || 0,
+      previouslyReceivedQuantity: poItem?.receivedQuantity || 0,
+    };
     try {
-      const formattedItems = validItems.map(item => {
-        const prod = products.find(p => p.id === item.productId);
-        return {
-          productId: item.productId,
-          productName: prod ? prod.name : 'Unknown Product',
-          quantity: Number(item.quantity),
-          unitCost: Number(item.unitCost)
-        };
-      });
+      setLineItems(current => mergeReceiptLine(current, incoming));
+      setSearchTerm('');
+      setHighlightedResult(0);
+      setError('');
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : 'Unable to add this product.');
+    }
+  };
 
+  const updateLine = (index: number, patch: Partial<ReceiptDraftLine>) => {
+    setLineItems(current => current.map((line, lineIndex) =>
+      lineIndex === index ? { ...line, ...patch } : line,
+    ));
+  };
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selectedSupplier) {
+      setError('Select a supplier.');
+      return;
+    }
+    if (!warehouseId || !activeWarehouses.some(warehouse => warehouse.id === warehouseId)) {
+      setError('Select an active licensed destination warehouse.');
+      return;
+    }
+    if (lineItems.length === 0) {
+      setError('Add at least one product to the receipt.');
+      return;
+    }
+    try {
+      assertReceiptAllowed('warehouse', comparisons, exceptionRequested);
+      if (hasOverReceipt && exceptionRequested && !exceptionReason.trim()) {
+        throw new Error('Provide a reason for the over-receipt exception request.');
+      }
+      setIsSubmitting(true);
+      setError('');
       await receiveSupplierStock(
         vendorId,
-        warehouseId || defaultWarehouse.id,
-        supplierName.trim(),
-        referenceNo.trim() || `PO-${Math.floor(1000 + Math.random() * 9000)}`,
-        formattedItems,
-        notes.trim()
+        warehouseId,
+        selectedSupplier.id,
+        selectedSupplier.name,
+        selectedPurchaseOrder?.orderNumber || referenceNo.trim() || `REC-${Date.now()}`,
+        lineItems,
+        notes.trim(),
+        { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role },
+        selectedPurchaseOrder,
+        { requested: hasOverReceipt && exceptionRequested, reason: exceptionReason },
       );
-
       onSuccess();
       onClose();
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || 'Failed to record supplier stock receipt.');
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : 'Failed to submit supplier stock receipt.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const grandTotal = lineItems.reduce((sum, item) => sum + (item.quantity * item.unitCost), 0);
-
   return (
-    <Modal
-      isOpen={isOpen}
-      onClose={onClose}
-      title="Receive Stock from Supplier"
-      subtitle="Exclusively received into Central Warehouse first"
-      maxWidth="3xl"
-    >
-      <form onSubmit={handleSubmit} className="space-y-5">
-        
-        {/* Mandatory Rule Banner */}
-        <div className="bg-amber-50 border border-amber-200/90 rounded-2xl p-3.5 text-xs sm:text-sm text-amber-900 flex items-start gap-3">
-          <Truck className="w-5 h-5 text-[#FF6600] shrink-0 mt-0.5" />
-          <div>
-            <p className="font-bold text-slate-900">iTred Inventory Rule</p>
-            <p className="text-slate-700 mt-0.5">
-              All supplier shipments MUST be received into the <span className="font-bold text-slate-900">Central Warehouse</span> first before being distributed to retail branches.
-            </p>
+    <>
+      <Modal
+        isOpen={isOpen}
+        onClose={onClose}
+        title="Receive Stock from Supplier"
+        subtitle="Purchase-order comparison and controlled warehouse intake"
+        maxWidth="4xl"
+      >
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <div className="flex items-start gap-3 rounded-xl border border-orange-200 bg-orange-50 p-3 text-xs text-[#1F242D]">
+            <Truck className="mt-0.5 h-5 w-5 shrink-0 text-[#FF6600]" />
+            <p><strong>Warehouse-only intake:</strong> stock increases only after this receipt is approved and completed atomically.</p>
           </div>
-        </div>
 
-        {error && (
-          <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs sm:text-sm rounded-xl font-medium">
-            {error}
-          </div>
-        )}
+          {error && (
+            <div className="flex gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-xs font-semibold text-red-700">
+              <AlertCircle className="h-4 w-4 shrink-0" />{error}
+            </div>
+          )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-xs font-bold text-slate-900 mb-1">
-              Destination Central Warehouse <span className="text-[#FF6600]">*</span>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <label className="text-xs font-bold text-[#1F242D]">
+              Destination warehouse
+              <select value={warehouseId} onChange={event => setWarehouseId(event.target.value)}
+                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+                {activeWarehouses.map(warehouse => (
+                  <option key={warehouse.id} value={warehouse.id}>{warehouse.name} ({warehouse.code})</option>
+                ))}
+              </select>
             </label>
-            <select
-              value={warehouseId || defaultWarehouse?.id}
-              onChange={(e) => setWarehouseId(e.target.value)}
-              className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-900 text-xs sm:text-sm font-semibold focus:ring-2 focus:ring-[#FF6600] focus:outline-none"
-            >
-              {warehouses.map(w => (
-                <option key={w.id} value={w.id}>{w.name} ({w.code})</option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-900 mb-1">
-              Supplier / Distributor Name <span className="text-[#FF6600]">*</span>
+            <label className="text-xs font-bold text-[#1F242D]">
+              Supplier
+              <select value={supplierId} disabled={loadingSuppliers} onChange={event => setSupplierId(event.target.value)}
+                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+                <option value="">{loadingSuppliers ? 'Loading suppliers…' : 'Select supplier'}</option>
+                {suppliers.map(supplier => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}
+              </select>
             </label>
-            <input
-              type="text"
-              required
-              value={supplierName}
-              onChange={(e) => setSupplierName(e.target.value)}
-              placeholder="e.g. Acme Logistics & Distributors"
-              className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-900 text-xs sm:text-sm font-medium focus:ring-2 focus:ring-[#FF6600] focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-900 mb-1">
-              Purchase Order / Invoice Ref #
+            <label className="text-xs font-bold text-[#1F242D]">
+              Open purchase order (optional)
+              <select value={purchaseOrderId} disabled={!supplierId || loadingOrders}
+                onChange={event => {
+                  setPurchaseOrderId(event.target.value);
+                  setLineItems([]);
+                }}
+                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+                <option value="">{loadingOrders ? 'Loading orders…' : 'Free-order receipt'}</option>
+                {purchaseOrders.map(order => (
+                  <option key={order.id} value={order.id}>
+                    {order.orderNumber} • {order.status.replaceAll('_', ' ')}
+                  </option>
+                ))}
+              </select>
             </label>
-            <input
-              type="text"
-              value={referenceNo}
-              onChange={(e) => setReferenceNo(e.target.value)}
-              placeholder="e.g. PO-2026-8819"
-              className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-900 text-xs sm:text-sm font-medium focus:ring-2 focus:ring-[#FF6600] focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-900 mb-1">
-              Notes / Delivery Vehicle #
+            <label className="text-xs font-bold text-[#1F242D]">
+              Free-order invoice/reference
+              <input value={referenceNo} disabled={Boolean(selectedPurchaseOrder)}
+                onChange={event => setReferenceNo(event.target.value)}
+                placeholder="Supplier invoice or delivery note"
+                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 disabled:bg-slate-100" />
             </label>
-            <input
-              type="text"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="e.g. Delivered via Truck #4"
-              className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-900 text-xs sm:text-sm font-medium focus:ring-2 focus:ring-[#FF6600] focus:outline-none"
-            />
-          </div>
-        </div>
-
-        {/* Line items table */}
-        <div className="space-y-3 pt-2">
-          <div className="flex items-center justify-between">
-            <h4 className="text-xs sm:text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-              <PackageCheck className="w-4 h-4 text-[#FF6600]" />
-              Received Stock Items
-            </h4>
-            <button
-              type="button"
-              onClick={handleAddLine}
-              className="px-3 py-1.5 bg-orange-50 hover:bg-orange-100 text-[#FF6600] rounded-xl text-xs font-bold transition-all flex items-center gap-1 border border-orange-200 cursor-pointer"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              Add Item
-            </button>
           </div>
 
-          <div className="border border-slate-200 rounded-2xl overflow-hidden bg-white">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs sm:text-sm">
-                <thead className="bg-[#1F242D] text-slate-200 font-bold uppercase text-[11px] tracking-wider">
-                  <tr>
-                    <th className="p-3">Product</th>
-                    <th className="p-3 w-28 text-center">Qty Recv.</th>
-                    <th className="p-3 w-32 text-right">Unit Cost ($)</th>
-                    <th className="p-3 w-32 text-right">Subtotal ($)</th>
-                    <th className="p-3 w-12 text-center"></th>
+          <div className="relative">
+            <label className="text-xs font-bold text-[#1F242D]">Find a product</label>
+            <div className="relative mt-1">
+              <Search className="absolute left-3 top-3 h-4 w-4 text-slate-400" />
+              <input value={searchTerm}
+                onChange={event => {
+                  setSearchTerm(event.target.value);
+                  setHighlightedResult(0);
+                }}
+                onKeyDown={event => {
+                  if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    setHighlightedResult(current => Math.min(current + 1, searchResults.length - 1));
+                  } else if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    setHighlightedResult(current => Math.max(0, current - 1));
+                  } else if (event.key === 'Enter' && searchResults[highlightedResult]) {
+                    event.preventDefault();
+                    addProduct(searchResults[highlightedResult]);
+                  }
+                }}
+                placeholder="Search SKU, name, brand, manufacturer code or barcode"
+                className="w-full rounded-xl border border-slate-200 py-2.5 pl-9 pr-3 focus:ring-2 focus:ring-[#FF6600]" />
+            </div>
+            {searchTerm && searchResults.length > 0 && (
+              <div className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
+                {searchResults.map((product, index) => (
+                  <button key={product.id} type="button" onClick={() => addProduct(product)}
+                    className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs ${
+                      index === highlightedResult ? 'bg-orange-50 text-[#1F242D]' : 'hover:bg-slate-50'
+                    }`}>
+                    <span><strong>{product.name}</strong><span className="ml-2 font-mono text-[#FF6600]">{product.sku}</span></span>
+                    <span className="text-slate-500">{product.brand || product.manufacturerCode || product.barcode}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="overflow-x-auto rounded-xl border border-slate-200">
+            <table className="w-full min-w-[1180px] text-left text-xs">
+              <thead className="bg-[#1F242D] text-white">
+                <tr>
+                  <th className="p-3">SKU / Product</th><th className="p-3 text-right">Ordered</th>
+                  <th className="p-3 text-right">Previously received</th><th className="p-3 text-right">Receiving</th>
+                  <th className="p-3 text-right">Outstanding</th><th className="p-3 text-right">Warehouse available</th>
+                  <th className="p-3 text-right">Unit cost</th><th className="p-3 text-right">Variance</th>
+                  <th className="p-3">Batch / unit</th><th className="p-3">Status</th><th className="p-3" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {comparisons.map((line, index) => (
+                  <tr key={`${line.productId}-${line.batchNumber || ''}-${line.unitOfMeasure}`}>
+                    <td className="p-3">
+                      <p className="font-mono font-bold text-[#FF6600]">{line.sku}</p>
+                      <button type="button" onDoubleClick={() => setLedgerProduct(products.find(product => product.id === line.productId) || null)}
+                        className="font-bold text-[#1F242D] underline-offset-2 hover:text-[#FF6600] hover:underline"
+                        title="Double-click to open product ledger">{line.productName}</button>
+                    </td>
+                    <td className="p-3 text-right">{line.orderedQuantity}</td>
+                    <td className="p-3 text-right">{line.previouslyReceivedQuantity}</td>
+                    <td className="p-3"><input type="number" min="1" value={line.quantity}
+                      onChange={event => updateLine(index, { quantity: Math.max(1, Number(event.target.value) || 1) })}
+                      className="w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-right font-bold" /></td>
+                    <td className="p-3 text-right">{line.outstandingAfterReceipt}</td>
+                    <td className="p-3 text-right">{warehouseStock[line.productId] || 0}</td>
+                    <td className="p-3"><input type="number" min="0" step="0.01" value={line.unitCost}
+                      onChange={event => updateLine(index, { unitCost: Number(event.target.value) || 0 })}
+                      className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-right" /></td>
+                    <td className={`p-3 text-right font-bold ${line.variance > 0 ? 'text-red-700' : 'text-slate-700'}`}>{line.variance}</td>
+                    <td className="p-3">
+                      <input value={line.batchNumber || ''} onChange={event => updateLine(index, { batchNumber: event.target.value })}
+                        placeholder="Batch" className="mb-1 w-24 rounded border border-slate-200 px-2 py-1" />
+                      <input value={line.unitOfMeasure} onChange={event => updateLine(index, { unitOfMeasure: event.target.value })}
+                        placeholder="Unit" className="w-24 rounded border border-slate-200 px-2 py-1" />
+                    </td>
+                    <td className="p-3"><span className={`rounded-full px-2 py-1 font-bold ${
+                      line.status === 'OVER_RECEIPT' ? 'bg-red-100 text-red-700' :
+                      line.status === 'MATCHED' ? 'bg-emerald-100 text-emerald-700' :
+                      'bg-orange-100 text-orange-800'
+                    }`}>{line.status.replaceAll('_', ' ')}</span></td>
+                    <td className="p-3"><button type="button" onClick={() => setLineItems(current => current.filter((_, itemIndex) => itemIndex !== index))}
+                      aria-label={`Remove ${line.productName}`} className="text-slate-400 hover:text-red-600"><Trash2 className="h-4 w-4" /></button></td>
                   </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {lineItems.map((line, idx) => {
-                    const lineSubtotal = (line.quantity || 0) * (line.unitCost || 0);
-                    return (
-                      <tr key={idx} className="hover:bg-slate-50">
-                        <td className="p-2.5">
-                          <select
-                            value={line.productId}
-                            onChange={(e) => handleProductChange(idx, e.target.value)}
-                            className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 font-semibold text-xs focus:ring-1 focus:ring-[#FF6600]"
-                          >
-                            {products.map(p => (
-                              <option key={p.id} value={p.id}>{p.name} ({p.sku})</option>
-                            ))}
-                          </select>
-                        </td>
-                        <td className="p-2.5">
-                          <input
-                            type="number"
-                            min="1"
-                            value={line.quantity}
-                            onChange={(e) => {
-                              const val = Math.max(1, parseInt(e.target.value) || 0);
-                              const updated = [...lineItems];
-                              updated[idx].quantity = val;
-                              setLineItems(updated);
-                            }}
-                            className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-center text-slate-900 font-bold text-xs focus:ring-1 focus:ring-[#FF6600]"
-                          />
-                        </td>
-                        <td className="p-2.5">
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="0"
-                            value={line.unitCost}
-                            onChange={(e) => {
-                              const val = parseFloat(e.target.value) || 0;
-                              const updated = [...lineItems];
-                              updated[idx].unitCost = val;
-                              setLineItems(updated);
-                            }}
-                            className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-right text-slate-900 font-bold text-xs focus:ring-1 focus:ring-[#FF6600]"
-                          />
-                        </td>
-                        <td className="p-2.5 text-right font-bold text-slate-900">
-                          ${lineSubtotal.toFixed(2)}
-                        </td>
-                        <td className="p-2.5 text-center">
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveLine(idx)}
-                            disabled={lineItems.length === 1}
-                            className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg transition-colors disabled:opacity-30"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                ))}
+                {comparisons.length === 0 && <tr><td colSpan={11} className="p-8 text-center text-slate-500">Search and add products to receive.</td></tr>}
+              </tbody>
+            </table>
+          </div>
 
-            <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-600">Total Purchase Order Value:</span>
-              <span className="text-lg font-black text-[#FF6600]">${grandTotal.toFixed(2)}</span>
+          {hasOverReceipt && (
+            <div className="space-y-2 rounded-xl border border-red-200 bg-red-50 p-3">
+              <label className="flex items-center gap-2 text-xs font-bold text-red-800">
+                <input type="checkbox" checked={exceptionRequested} onChange={event => setExceptionRequested(event.target.checked)} />
+                Request an authorised over-receipt exception
+              </label>
+              {exceptionRequested && <textarea value={exceptionReason} onChange={event => setExceptionReason(event.target.value)}
+                placeholder="Explain the over-receipt variance for the approver"
+                className="w-full rounded-lg border border-red-200 bg-white px-3 py-2 text-xs" />}
+            </div>
+          )}
+
+          <label className="block text-xs font-bold text-[#1F242D]">
+            Notes
+            <textarea value={notes} onChange={event => setNotes(event.target.value)}
+              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2" />
+          </label>
+
+          <div className="flex flex-col-reverse gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm font-bold text-[#1F242D]"><PackageCheck className="mr-2 inline h-4 w-4 text-[#FF6600]" />Receipt value: ${grandTotal.toFixed(2)}</p>
+            <div className="flex gap-2">
+              <button type="button" onClick={onClose} className="rounded-xl px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-100">Cancel</button>
+              <button type="submit" disabled={isSubmitting || !selectedSupplier}
+                className="rounded-xl bg-[#FF6600] px-5 py-2.5 text-xs font-bold text-white disabled:opacity-50">
+                {isSubmitting ? 'Submitting…' : 'Submit Receipt for Approval'}
+              </button>
             </div>
           </div>
-        </div>
+        </form>
+      </Modal>
 
-        {/* Submit Actions */}
-        <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-5 py-2.5 text-xs sm:text-sm font-bold text-slate-600 hover:bg-slate-100 rounded-xl transition-all cursor-pointer"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={isSubmitting}
-            className="px-6 py-2.5 bg-[#FF6600] hover:bg-[#E65C00] text-white font-bold rounded-xl text-xs sm:text-sm shadow-md flex items-center gap-2 transition-all cursor-pointer"
-          >
-            {isSubmitting ? 'Posting Receipt...' : 'Confirm Stock Receipt into Warehouse'}
-          </button>
-        </div>
-
-      </form>
-    </Modal>
+      <ProductLedgerModal
+        isOpen={ledgerProduct !== null}
+        onClose={() => setLedgerProduct(null)}
+        vendorId={vendorId}
+        warehouse={activeWarehouses.find(warehouse => warehouse.id === warehouseId)}
+        product={ledgerProduct}
+      />
+    </>
   );
 };

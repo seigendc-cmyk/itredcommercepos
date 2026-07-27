@@ -20,6 +20,7 @@ import {
 } from '../../services/db';
 import { InvoiceModal } from './InvoiceModal';
 import { ConsolePlanModal } from './ConsolePlanModal';
+import { getBaseResourceAllowance } from '../../services/resourceEntitlements';
 import { ServiceOrderModal } from './ServiceOrderModal';
 import {
   CreditCard,
@@ -432,6 +433,8 @@ export const VendorBillingWorkspace: React.FC<VendorBillingWorkspaceProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {plans.map(plan => {
               const isCurrent = subscription?.planId === plan.id;
+              const warehouseAllowance = getBaseResourceAllowance(plan, 'warehouse');
+              const terminalAllowance = getBaseResourceAllowance(plan, 'terminal');
               return (
                 <div
                   key={plan.id}
@@ -467,6 +470,11 @@ export const VendorBillingWorkspace: React.FC<VendorBillingWorkspaceProps> = ({
 
                     <div className="space-y-2 pt-2">
                       <p className="text-[11px] font-bold text-slate-900 uppercase tracking-wider">Features & Entitlements:</p>
+                      <p className="text-[11px] font-semibold text-slate-500">
+                        {warehouseAllowance} warehouse{warehouseAllowance === 1 ? '' : 's'} ·{' '}
+                        {plan.maxBranches} branch{plan.maxBranches === 1 ? '' : 'es'} ·{' '}
+                        {terminalAllowance} POS terminal{terminalAllowance === 1 ? '' : 's'}
+                      </p>
                       <div className="space-y-1.5 text-xs text-slate-700">
                         {plan.features.map((feat, idx) => (
                           <div key={idx} className="flex items-center gap-2">

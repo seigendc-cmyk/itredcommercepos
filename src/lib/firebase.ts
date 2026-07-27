@@ -1,25 +1,62 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
-import firebaseConfigData from '../../firebase-applet-config.json';
+﻿import { getApp, getApps, initializeApp } from "firebase/app";
+import {
+  getAuth,
+  GoogleAuthProvider,
+} from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
+import { getStorage } from "firebase/storage";
 
-const firebaseConfig = {
-  apiKey: firebaseConfigData.apiKey,
-  authDomain: firebaseConfigData.authDomain,
-  projectId: firebaseConfigData.projectId,
-  storageBucket: firebaseConfigData.storageBucket,
-  messagingSenderId: firebaseConfigData.messagingSenderId,
-  appId: firebaseConfigData.appId,
+const requiredEnvironmentVariables = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+const missingEnvironmentVariables = Object.entries(
+  requiredEnvironmentVariables,
+)
+  .filter(([, value]) => !value)
+  .map(([key]) => key);
+
+if (missingEnvironmentVariables.length > 0) {
+  throw new Error(
+    `Missing Firebase environment variables: ${missingEnvironmentVariables.join(", ")}`,
+  );
+}
+
+const firebaseConfig = {
+  apiKey: requiredEnvironmentVariables.apiKey,
+  authDomain: requiredEnvironmentVariables.authDomain,
+  projectId: requiredEnvironmentVariables.projectId,
+  storageBucket: requiredEnvironmentVariables.storageBucket,
+  messagingSenderId: requiredEnvironmentVariables.messagingSenderId,
+  appId: requiredEnvironmentVariables.appId,
+};
+
+export const app =
+  getApps().length > 0
+    ? getApp()
+    : initializeApp(firebaseConfig);
 
 export const auth = getAuth(app);
+
 export const googleProvider = new GoogleAuthProvider();
 
-// Custom database ID if specified in config, else default
-export const db = firebaseConfigData.firestoreDatabaseId && firebaseConfigData.firestoreDatabaseId !== ''
-  ? getFirestore(app, firebaseConfigData.firestoreDatabaseId)
-  : getFirestore(app);
+googleProvider.setCustomParameters({
+  prompt: "select_account",
+});
+
+export const databaseId =
+  import.meta.env.VITE_DATABASE_ID ||
+  "ai-studio-6dd086fa-b537-4e03-b916-32eee1121008";
+
+export const db = getFirestore(app, databaseId);
+export const storage = getStorage(app);
+
+export const firebaseProjectId =
+  requiredEnvironmentVariables.projectId;
 
 export default app;
