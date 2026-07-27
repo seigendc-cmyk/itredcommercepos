@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Modal } from '../Common/Modal';
-import { Branch, Product } from '../../types';
+import { Branch, Product, StaffMember } from '../../types';
 import { adjustBranchStock } from '../../services/db';
 import { SlidersHorizontal, Plus, Trash2, Store, Sparkles } from 'lucide-react';
 
@@ -12,6 +12,7 @@ interface StockAdjustmentModalProps {
   activeBranchId?: string;
   products: Product[];
   branchStock: Record<string, number>;
+  activeStaff: StaffMember;
   onSuccess: () => void;
 }
 
@@ -23,6 +24,7 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
   activeBranchId,
   products,
   branchStock,
+  activeStaff,
   onSuccess
 }) => {
   const defaultBranch = branches.find(b => b.id === activeBranchId) || branches[0];
@@ -92,14 +94,15 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
         selectedBr?.name || 'Main Branch',
         type,
         itemsFormatted,
-        notes.trim()
+        notes.trim(),
+        { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role },
       );
 
       onSuccess();
       onClose();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
-      setError(err.message || 'Branch stock adjustment failed.');
+      setError(err instanceof Error ? err.message : 'Branch stock adjustment failed.');
     } finally {
       setIsSubmitting(false);
     }
@@ -296,7 +299,11 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
             disabled={isSubmitting}
             className="px-6 py-2.5 bg-[#FF6600] hover:bg-[#E65C00] text-white font-bold rounded-xl text-xs sm:text-sm shadow-md flex items-center gap-2 transition-all cursor-pointer"
           >
-            {isSubmitting ? 'Saving Adjustment...' : 'Apply Stock Adjustment'}
+            {isSubmitting
+              ? 'Submitting...'
+              : type === 'opening_balance' || type === 'recount'
+                ? 'Submit Adjustment for Approval'
+                : 'Apply Stock Adjustment'}
           </button>
         </div>
 

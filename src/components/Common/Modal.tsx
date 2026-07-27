@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { X } from 'lucide-react';
+import { Button } from './ui';
 
 interface ModalProps {
   isOpen: boolean;
@@ -45,32 +46,33 @@ export const Modal: React.FC<ModalProps> = ({
   }[maxWidth];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 md:p-6 bg-slate-950/60 backdrop-blur-sm transition-opacity animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-sm sm:p-4 md:p-6" role="presentation">
       {/* Backdrop click to close */}
       <div className="fixed inset-0" onClick={onClose} aria-hidden="true" />
 
       {/* Floating Card Modal Container */}
-      <div className={`relative w-full ${maxWidthClasses} bg-white rounded-2xl shadow-2xl border border-slate-100 overflow-hidden flex flex-col max-h-[92vh] z-10 transition-transform transform scale-100`}>
+      <div className={`relative z-10 flex max-h-[92vh] w-full ${maxWidthClasses} flex-col overflow-hidden rounded-[var(--itred-radius-lg)] border border-[var(--itred-color-border)] bg-white shadow-[var(--itred-shadow-floating)]`} role="dialog" aria-modal="true" aria-labelledby="itred-dialog-title">
         
         {/* Card Header with Matt Charcoal Grey background and vibrant Orange accent border */}
-        <div className="bg-[#1F242D] text-white px-5 py-4 sm:px-6 sm:py-5 flex items-center justify-between border-b-2 border-[#FF6600]">
+        <div className="flex items-center justify-between border-b-2 border-[var(--itred-color-primary)] bg-[var(--itred-color-charcoal)] px-5 py-4 text-white sm:px-6">
           <div>
-            <h3 className="text-base sm:text-lg md:text-xl font-bold tracking-tight text-white flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-[#FF6600] inline-block animate-pulse"></span>
+            <h2 id="itred-dialog-title" className="flex items-center gap-2 text-base font-bold tracking-tight text-white sm:text-lg">
+              <span className="inline-block size-1.5 bg-[var(--itred-color-primary)]"></span>
               {title}
-            </h3>
+            </h2>
             {subtitle && (
               <p className="text-xs sm:text-sm text-slate-300 mt-0.5 font-normal">{subtitle}</p>
             )}
           </div>
-          <button
+          <Button
             onClick={onClose}
-            type="button"
-            className="p-1.5 sm:p-2 text-slate-300 hover:text-white hover:bg-white/10 rounded-xl transition-colors focus:outline-none focus:ring-2 focus:ring-[#FF6600]"
+            variant="quiet"
+            size="sm"
+            className="min-h-8 border-white/20 bg-transparent px-2 text-slate-200 shadow-none hover:bg-white/10 hover:text-white"
             aria-label="Close modal"
           >
-            <X className="w-5 h-5 sm:w-6 sm:h-6" />
-          </button>
+            <X className="size-5" />
+          </Button>
         </div>
 
         {/* Card Body - Clean White with crisp typography */}

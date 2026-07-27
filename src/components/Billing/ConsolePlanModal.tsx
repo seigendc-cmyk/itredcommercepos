@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BillingPlan } from '../../types';
+import { getBaseResourceAllowance } from '../../services/resourceEntitlements';
 import {
   X,
   Plus,
@@ -34,7 +35,9 @@ export const ConsolePlanModal: React.FC<ConsolePlanModalProps> = ({
   const [description, setDescription] = useState('');
   const [features, setFeatures] = useState<string[]>([]);
   const [newFeatureText, setNewFeatureText] = useState('');
+  const [maxWarehouses, setMaxWarehouses] = useState<number>(1);
   const [maxBranches, setMaxBranches] = useState<number>(3);
+  const [maxTerminals, setMaxTerminals] = useState<number>(3);
   const [maxStaff, setMaxStaff] = useState<number>(10);
   const [isPopular, setIsPopular] = useState(false);
   const [status, setStatus] = useState<'active' | 'archived'>('active');
@@ -48,7 +51,9 @@ export const ConsolePlanModal: React.FC<ConsolePlanModalProps> = ({
       setCurrency(editingPlan.currency || '$');
       setDescription(editingPlan.description);
       setFeatures(editingPlan.features || []);
+      setMaxWarehouses(getBaseResourceAllowance(editingPlan, 'warehouse'));
       setMaxBranches(editingPlan.maxBranches);
+      setMaxTerminals(getBaseResourceAllowance(editingPlan, 'terminal'));
       setMaxStaff(editingPlan.maxStaff);
       setIsPopular(!!editingPlan.isPopular);
       setStatus(editingPlan.status);
@@ -63,7 +68,9 @@ export const ConsolePlanModal: React.FC<ConsolePlanModalProps> = ({
         'Unlimited POS Terminals',
         '7-Day Advance Auto-Invoicing'
       ]);
+      setMaxWarehouses(1);
       setMaxBranches(3);
+      setMaxTerminals(3);
       setMaxStaff(10);
       setIsPopular(false);
       setStatus('active');
@@ -99,7 +106,9 @@ export const ConsolePlanModal: React.FC<ConsolePlanModalProps> = ({
         currency,
         description: description.trim(),
         features,
+        maxWarehouses: Number(maxWarehouses),
         maxBranches: Number(maxBranches),
+        maxTerminals: Number(maxTerminals),
         maxStaff: Number(maxStaff),
         isPopular,
         status,
@@ -161,7 +170,7 @@ export const ConsolePlanModal: React.FC<ConsolePlanModalProps> = ({
               <label className="text-[11px] font-bold text-slate-900 block mb-1">Status</label>
               <select
                 value={status}
-                onChange={e => setStatus(e.target.value as any)}
+                onChange={e => setStatus(e.target.value as 'active' | 'archived')}
                 className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-[#FF6B00] focus:outline-none"
               >
                 <option value="active">Active (Visible to Vendors)</option>
@@ -228,6 +237,18 @@ export const ConsolePlanModal: React.FC<ConsolePlanModalProps> = ({
 
           <div className="grid grid-cols-2 gap-3">
             <div>
+              <label className="text-[11px] font-bold text-slate-900 block mb-1">Max Warehouses</label>
+              <input
+                type="number"
+                min="1"
+                max="999"
+                value={maxWarehouses}
+                onChange={e => setMaxWarehouses(Number(e.target.value))}
+                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-[#FF6B00] focus:outline-none"
+              />
+            </div>
+
+            <div>
               <label className="text-[11px] font-bold text-slate-900 block mb-1">Max Branches Limit</label>
               <input
                 type="number"
@@ -235,6 +256,18 @@ export const ConsolePlanModal: React.FC<ConsolePlanModalProps> = ({
                 max="999"
                 value={maxBranches}
                 onChange={e => setMaxBranches(Number(e.target.value))}
+                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-[#FF6B00] focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="text-[11px] font-bold text-slate-900 block mb-1">Max POS Terminals</label>
+              <input
+                type="number"
+                min="1"
+                max="999"
+                value={maxTerminals}
+                onChange={e => setMaxTerminals(Number(e.target.value))}
                 className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-[#FF6B00] focus:outline-none"
               />
             </div>

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Modal } from '../Common/Modal';
 import { Branch } from '../../types';
 import { createBranch, createTerminal } from '../../services/db';
+import { ResourceEntitlementError } from '../../services/resourceEntitlements';
 import { Store, Tv2, MapPin, Phone } from 'lucide-react';
 
 interface AddBranchTerminalModalProps {
@@ -57,18 +58,30 @@ export const AddBranchTerminalModal: React.FC<AddBranchTerminalModalProps> = ({
           setIsSubmitting(false);
           return;
         }
+        const branchId = targetBranchId || branches[0]?.id;
+        if (!branchId) {
+          setError('Create an active branch before adding a POS terminal.');
+          setIsSubmitting(false);
+          return;
+        }
         await createTerminal(
           vendorId,
-          targetBranchId || branches[0]?.id,
+          branchId,
           terminalName.trim()
         );
       }
 
       onSuccess();
       onClose();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
-      setError(err.message || 'Failed to create entity.');
+      setError(
+        err instanceof ResourceEntitlementError
+          ? `Upgrade required: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : 'Failed to create resource.',
+      );
     } finally {
       setIsSubmitting(false);
     }

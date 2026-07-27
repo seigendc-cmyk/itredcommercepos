@@ -1,6 +1,15 @@
 import React, { useState } from 'react';
-import { Warehouse, Product, SupplierReceipt, StockTransfer } from '../../types';
+import { StaffMember, VendorProfile, Warehouse, Product, SupplierReceipt, StockTransfer } from '../../types';
 import { Warehouse as WarehouseIcon, PlusCircle, ArrowLeftRight, Truck, Package, Search } from 'lucide-react';
+import { TransferSlipModal } from './TransferSlipModal';
+import {
+  canRolePreviewTransferSlip,
+  isOperationalTransferStatus,
+  TransferSlipAction,
+  TransferSlipFormat,
+} from '../../services/transferSlip';
+import { confirmStockTransferReceipt, dispatchStockTransfer } from '../../services/db';
+import { TransferReceiptModal } from './TransferReceiptModal';
 
 interface WarehouseManagementProps {
   warehouses: Warehouse[];
@@ -8,8 +17,17 @@ interface WarehouseManagementProps {
   warehouseStock: Record<string, number>;
   supplierReceipts: SupplierReceipt[];
   transfers: StockTransfer[];
+  vendor: VendorProfile;
+  activeStaff: StaffMember;
+  onOpenAddWarehouseModal: () => void;
   onOpenSupplierReceiveModal: () => void;
   onOpenTransferModal: () => void;
+  onTransferSlipAction: (
+    action: TransferSlipAction,
+    transfer: StockTransfer,
+    format: TransferSlipFormat,
+  ) => Promise<void>;
+  onTransferUpdated: () => void | Promise<void>;
 }
 
 export const WarehouseManagement: React.FC<WarehouseManagementProps> = ({
@@ -18,11 +36,19 @@ export const WarehouseManagement: React.FC<WarehouseManagementProps> = ({
   warehouseStock,
   supplierReceipts,
   transfers,
+  vendor,
+  activeStaff,
+  onOpenAddWarehouseModal,
   onOpenSupplierReceiveModal,
-  onOpenTransferModal
+  onOpenTransferModal,
+  onTransferSlipAction,
+  onTransferUpdated,
 }) => {
   const [activeTab, setActiveTab] = useState<'inventory' | 'receipts' | 'transfers'>('inventory');
   const [searchTerm, setSearchTerm] = useState('');
+  const [selectedTransfer, setSelectedTransfer] = useState<StockTransfer | null>(null);
+  const [receivingTransfer, setReceivingTransfer] = useState<StockTransfer | null>(null);
+  const [processingTransferId, setProcessingTransferId] = useState<string | null>(null);
 
   const currentWh = warehouses[0];
 
@@ -54,6 +80,14 @@ export const WarehouseManagement: React.FC<WarehouseManagementProps> = ({
         </div>
 
         <div className="flex items-center gap-2 w-full md:w-auto">
+          <button
+            onClick={onOpenAddWarehouseModal}
+            className="flex-1 md:flex-initial px-4 py-2 bg-white hover:bg-orange-50 text-[#FF6B00] border border-[#FF6B00] font-bold rounded text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+          >
+            <WarehouseIcon className="w-4 h-4" />
+            <span>Add Warehouse</span>
+          </button>
+
           <button
             onClick={onOpenSupplierReceiveModal}
             className="flex-1 md:flex-initial px-4 py-2 bg-[#FF6B00] hover:bg-[#e66000] text-white font-bold rounded text-xs sm:text-sm shadow flex items-center justify-center gap-2 transition-colors cursor-pointer"
@@ -215,6 +249,9 @@ export const WarehouseManagement: React.FC<WarehouseManagementProps> = ({
       {/* Tab 3: Outbound Branch Transfers */}
       {activeTab === 'transfers' && (
         <div className="bg-white rounded-2xl border border-slate-200/90 overflow-hidden shadow-sm">
+          <p className="border-b border-orange-100 bg-orange-50 px-4 py-2 text-xs font-semibold text-[#1F242D]">
+            Double-click an approved or completed transfer to preview its movement slip.
+          </p>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs sm:text-sm">
               <thead className="bg-[#1F242D] text-slate-200 font-bold uppercase text-[11px] tracking-wider">
@@ -224,27 +261,99 @@ export const WarehouseManagement: React.FC<WarehouseManagementProps> = ({
                   <th className="p-3.5">Date</th>
                   <th className="p-3.5">Items Transferred</th>
                   <th className="p-3.5 text-center">Status</th>
+                  <th className="p-3.5 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {transfers.map(trf => (
-                  <tr key={trf.id} className="hover:bg-slate-50">
+                {transfers.map(trf => {
+                  const canOpenSlip =
+                    canRolePreviewTransferSlip(activeStaff.role) &&
+                    isOperationalTransferStatus(trf.status);
+                  return (
+                  <tr
+                    key={trf.id}
+                    onDoubleClick={() => {
+                      if (canOpenSlip) setSelectedTransfer(trf);
+                    }}
+                    title={canOpenSlip ? 'Double-click to open transfer slip' : undefined}
+                    className={`hover:bg-orange-50/50 ${canOpenSlip ? 'cursor-pointer select-none' : ''}`}
+                  >
                     <td className="p-3.5 font-mono font-bold text-[#FF6600]">{trf.transferNo}</td>
                     <td className="p-3.5 font-bold text-slate-900">{trf.targetBranchName}</td>
                     <td className="p-3.5 text-slate-600">{new Date(trf.date).toLocaleString()}</td>
                     <td className="p-3.5 text-slate-800">
-                      {trf.items.map(i => `${i.productName} (${i.quantity})`).join(', ')}
+                      <div className="space-y-2">
+                        {trf.items.map((item, index) => {
+                          const requested = item.quantityRequested ?? item.quantity;
+                          const approved = item.quantityApproved ?? 0;
+                          const dispatched = item.quantityDispatched ?? 0;
+                          const received = item.quantityReceived ?? 0;
+                          return (
+                            <div key={`${item.productId}-${index}`} className="min-w-[430px]">
+                              <p className="font-bold text-slate-900">
+                                <span className="mr-2 font-mono text-[#FF6600]">{item.sku || '—'}</span>
+                                {item.productName}
+                              </p>
+                              <p className="mt-0.5 text-[10px] text-slate-600">
+                                Requested {requested} • Approved {approved} • Dispatched {dispatched} •
+                                Received {received} • Outstanding {Math.max(0, dispatched - received)} •
+                                {item.unitOfMeasure || 'unit'}
+                              </p>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </td>
                     <td className="p-3.5 text-center">
-                      <span className="px-2.5 py-1 bg-emerald-100 text-emerald-800 text-xs font-bold rounded-full">
+                      <span className={`px-2.5 py-1 text-xs font-bold rounded-full ${
+                        isOperationalTransferStatus(trf.status)
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : 'bg-orange-100 text-orange-800'
+                      }`}>
                         {trf.status.toUpperCase()}
                       </span>
                     </td>
+                    <td className="p-3.5 text-right">
+                      {String(trf.status).toUpperCase() === 'APPROVED' && (
+                        <button type="button" disabled={processingTransferId === trf.id}
+                          onClick={async event => {
+                            event.stopPropagation();
+                            setProcessingTransferId(trf.id);
+                            try {
+                              await dispatchStockTransfer(
+                                vendor.id,
+                                trf.id,
+                                { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role },
+                                trf.version || 1,
+                              );
+                              await onTransferUpdated();
+                            } catch (reason: unknown) {
+                              alert(reason instanceof Error ? reason.message : 'Transfer dispatch failed.');
+                            } finally {
+                              setProcessingTransferId(null);
+                            }
+                          }}
+                          className="rounded-lg bg-[#1F242D] px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50">
+                          Dispatch
+                        </button>
+                      )}
+                      {(String(trf.status).toUpperCase() === 'IN_TRANSIT' ||
+                        String(trf.status).toUpperCase() === 'PARTIALLY_RECEIVED') && (
+                        <button type="button" onClick={event => {
+                          event.stopPropagation();
+                          setReceivingTransfer(trf);
+                        }}
+                          className="rounded-lg bg-[#FF6600] px-3 py-1.5 text-xs font-bold text-white">
+                          Confirm receipt
+                        </button>
+                      )}
+                    </td>
                   </tr>
-                ))}
+                  );
+                })}
                 {transfers.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="p-8 text-center text-slate-500 font-medium">
+                    <td colSpan={6} className="p-8 text-center text-slate-500 font-medium">
                       No stock transfers recorded yet. Click "Transfer to Branch" to send stock to stores.
                     </td>
                   </tr>
@@ -255,6 +364,29 @@ export const WarehouseManagement: React.FC<WarehouseManagementProps> = ({
         </div>
       )}
 
+      <TransferSlipModal
+        isOpen={selectedTransfer !== null}
+        onClose={() => setSelectedTransfer(null)}
+        transfer={selectedTransfer}
+        vendor={vendor}
+        products={products}
+        onAction={onTransferSlipAction}
+      />
+      <TransferReceiptModal
+        transfer={receivingTransfer}
+        onClose={() => setReceivingTransfer(null)}
+        onConfirm={async (transfer, receipts, reason) => {
+          await confirmStockTransferReceipt(
+            vendor.id,
+            transfer.id,
+            { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role },
+            transfer.version || 1,
+            receipts,
+            reason,
+          );
+          await onTransferUpdated();
+        }}
+      />
     </div>
   );
 };

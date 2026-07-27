@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { onAuthStateChanged, signOut as firebaseSignOut } from 'firebase/auth';
 import { 
   VendorProfile, 
   Warehouse, 
@@ -17,7 +18,6 @@ import {
 } from './types';
 import {
   fetchVendorProfile,
-  onboardVendor,
   getLocalVendor,
   fetchWarehouses,
   fetchBranches,
@@ -45,11 +45,18 @@ import {
   closeTerminalShift,
   fetchShiftHistory
 } from './services/db';
+import { auth } from './lib/firebase';
+import {
+  AuthIdentity,
+  isDemoLoginEnabled,
+  resolveAuthState,
+} from './auth/authPolicy';
 
 // BI Layer
 import { logBIEvent, fetchBILogs } from './bi/tracker';
 import { processBIAnalytics } from './bi/analyticsEngine';
 import { BIEvent, BIEventType } from './bi/types';
+import { TransferSlipAction, TransferSlipFormat } from './services/transferSlip';
 
 // UI Components
 import { AuthView } from './components/AuthView';
@@ -71,10 +78,13 @@ import { VendorBillingWorkspace } from './components/Billing/VendorBillingWorksp
 import { Financial } from './components/Financial/Financial';
 import { Sidebar } from './components/Sidebar';
 import { StaffAccessForm } from './components/Auth/StaffAccessForm';
+import { OfflineOperationalStateBadge } from './components/Offline/OfflineOperationalStateBadge';
+import { LoadingState } from './components/Common/ui';
 
 // Modals
 import { ReceiveSupplierStockModal } from './components/Warehouse/ReceiveSupplierStockModal';
 import { TransferStockModal } from './components/Warehouse/TransferStockModal';
+import { AddWarehouseModal } from './components/Warehouse/AddWarehouseModal';
 import { StockAdjustmentModal } from './components/Branch/StockAdjustmentModal';
 import { AddBranchTerminalModal } from './components/Branch/AddBranchTerminalModal';
 import { ProductModal } from './components/Products/ProductModal';
@@ -93,7 +103,9 @@ import { DeliveryCourier, SubscriptionPlanType } from './types';
 
 export default function App() {
   // Auth State
-  const [authUser, setAuthUser] = useState<{ uid: string; email: string } | null>(null);
+  const [authUser, setAuthUser] = useState<AuthIdentity | null>(null);
+  const [authResolved, setAuthResolved] = useState(false);
+  const [authSessionError, setAuthSessionError] = useState('');
   const [vendor, setVendor] = useState<VendorProfile | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [loadingProfile, setLoadingProfile] = useState(false);
@@ -130,6 +142,7 @@ export default function App() {
 
   // Modals State
   const [isSupplierModalOpen, setIsSupplierModalOpen] = useState(false);
+  const [isAddWarehouseModalOpen, setIsAddWarehouseModalOpen] = useState(false);
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
   const [isStockAdjustmentModalOpen, setIsStockAdjustmentModalOpen] = useState(false);
   const [isAddBranchTerminalModalOpen, setIsAddBranchTerminalModalOpen] = useState(false);
@@ -143,6 +156,7 @@ export default function App() {
   const [activeCart, setActiveCart] = useState<CartItem[]>([]);
   const [cartTotals, setCartTotals] = useState<{ subtotal: number; tax: number; total: number }>({ subtotal: 0, tax: 0, total: 0 });
   const [lastCompletedOrder, setLastCompletedOrder] = useState<Order | null>(null);
+  const [checkoutAttemptId, setCheckoutAttemptId] = useState<string | null>(null);
 
   // Shift Management State
   const [activeShift, setActiveShift] = useState<TerminalShift | null>(null);
@@ -150,6 +164,47 @@ export default function App() {
   const [isCloseShiftModalOpen, setIsCloseShiftModalOpen] = useState(false);
   const [isEODReportModalOpen, setIsEODReportModalOpen] = useState(false);
   const [lastClosedShift, setLastClosedShift] = useState<TerminalShift | null>(null);
+
+  const demoLoginEnabled = isDemoLoginEnabled(
+    import.meta.env.DEV,
+    import.meta.env.VITE_ENABLE_DEMO_LOGIN,
+  );
+
+  // Restore and monitor the Firebase session.
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(
+      auth,
+      user => {
+        const resolution = resolveAuthState(user);
+        if (resolution.status === 'authenticated') {
+          setAuthSessionError('');
+          setAuthUser(resolution.identity);
+        } else {
+          setAuthUser(null);
+          setVendor(null);
+          setActiveStaff(null);
+          setIsStaffAuthenticated(false);
+
+          if (resolution.status === 'invalid') {
+            setAuthSessionError('Your Google account must provide a valid email address.');
+            void firebaseSignOut(auth);
+          }
+        }
+        setAuthResolved(true);
+      },
+      error => {
+        console.error('Firebase authentication state error:', error);
+        setAuthUser(null);
+        setVendor(null);
+        setActiveStaff(null);
+        setIsStaffAuthenticated(false);
+        setAuthSessionError('Unable to verify your Firebase session. Please sign in again.');
+        setAuthResolved(true);
+      },
+    );
+
+    return unsubscribe;
+  }, []);
 
   // 1. When Auth User changes, fetch Vendor Profile
   useEffect(() => {
@@ -162,17 +217,7 @@ export default function App() {
     const loadProfile = async () => {
       setLoadingProfile(true);
       try {
-        let prof = await fetchVendorProfile(authUser.uid, authUser.email);
-        
-        // Auto onboard returning vendor if email is seigendc@gmail.com or profile is null but returning persona clicked
-        if (!prof && (authUser.email === 'seigendc@gmail.com' || authUser.email.includes('vendor'))) {
-          const result = await onboardVendor(authUser.uid, authUser.email, {
-            businessName: authUser.email === 'seigendc@gmail.com' ? 'iTred Retail HQ' : 'iTred Commerce Store',
-            address: '742 Evergreen Terrace, Retail District',
-            phone: '+1 (555) 019-2831'
-          });
-          prof = result.profile;
-        }
+        const prof = await fetchVendorProfile(authUser.uid);
 
         if (prof && prof.onboardingCompleted) {
           setVendor(prof);
@@ -338,7 +383,8 @@ export default function App() {
   // Review Approval Request
   const handleReviewApproval = async (
     requestId: string,
-    status: 'approved' | 'rejected',
+    status: 'APPROVED' | 'REJECTED' | 'CANCELLED',
+    expectedVersion: number,
     comment?: string
   ) => {
     if (!vendor || !activeStaff) return;
@@ -347,45 +393,104 @@ export default function App() {
       requestId,
       status,
       { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role },
+      expectedVersion,
       comment
     );
     await refreshAllData();
   };
 
   // Submit Stocktake Approval Request
-  const handleSubmitStocktakeApproval = async (payload: any) => {
+  const handleSubmitStocktakeApproval = async (payload: {
+    title: string;
+    description: string;
+    dataPayload: {
+      locationType: 'warehouse' | 'branch';
+      locationId: string;
+      locationName: string;
+      items: {
+        productId: string;
+        productName: string;
+        quantityDelta: number;
+        costPrice?: number;
+        reason?: string;
+      }[];
+      [key: string]: unknown;
+    };
+  }) => {
     if (!vendor || !activeStaff) return;
     await createApprovalRequest(vendor.id, {
-      vendorId: vendor.id,
-      type: 'stock_adjustment',
+      entityType: 'STOCKTAKE_ADJUSTMENT',
+      entityId: `adj_${crypto.randomUUID()}`,
       title: payload.title,
       description: payload.description,
-      requesterId: activeStaff.id,
-      requesterName: activeStaff.name,
-      requesterRole: activeStaff.role,
-      branchId: payload.dataPayload?.locationId,
-      branchName: payload.dataPayload?.locationName,
+      requester: { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role },
+      branchId: payload.dataPayload.locationType === 'branch' ? payload.dataPayload.locationId : undefined,
+      branchName: payload.dataPayload.locationType === 'branch' ? payload.dataPayload.locationName : undefined,
+      warehouseId: payload.dataPayload.locationType === 'warehouse' ? payload.dataPayload.locationId : undefined,
+      warehouseName: payload.dataPayload.locationType === 'warehouse' ? payload.dataPayload.locationName : undefined,
       dataPayload: payload.dataPayload,
     });
     await refreshAllData();
   };
 
+  const handleTransferSlipAction = async (
+    action: TransferSlipAction,
+    transfer: StockTransfer,
+    format: TransferSlipFormat,
+  ) => {
+    if (!vendor || !activeStaff) return;
+    const eventByAction: Record<TransferSlipAction, BIEventType> = {
+      previewed: 'TRANSFER_SLIP_PREVIEWED',
+      printed: 'TRANSFER_SLIP_PRINTED',
+      exported: 'TRANSFER_SLIP_EXPORTED',
+    };
+    await logBIEvent(
+      vendor.id,
+      eventByAction[action],
+      `Transfer slip ${action} for ${transfer.transferNo}`,
+      {
+        transferId: transfer.id,
+        transferNumber: transfer.transferNo,
+        transferStatus: transfer.status,
+        format,
+        sourceWarehouseId: transfer.sourceWarehouseId,
+        sourceBranchId: transfer.sourceBranchId,
+        targetBranchId: transfer.targetBranchId,
+        readOnlyDocument: true,
+      },
+      {
+        staffId: activeStaff.id,
+        staffName: activeStaff.name,
+        staffRole: activeStaff.role,
+        branchId: transfer.sourceBranchId,
+        branchName: transfer.sourceBranchName,
+      },
+    );
+  };
+
   // Process POS Order completion
   const handleConfirmPayment = async (paymentDetails: any) => {
-    if (!vendor || !activeBranch || !activeTerminal || !activeStaff) return;
+    if (!vendor || !activeBranch || !activeTerminal || !activeStaff || !checkoutAttemptId) {
+      alert('The sale session is incomplete. Close payment and try again.');
+      return;
+    }
+    if (activeTerminal.branchId !== activeBranch.id) {
+      alert('The selected terminal does not belong to the active sale branch.');
+      return;
+    }
 
     try {
       const deliveryDetails = paymentDetails.deliveryDetails;
       const deliveryFee = deliveryDetails ? deliveryDetails.deliveryFee : 0;
       const finalTotalAmount = cartTotals.total + deliveryFee;
 
-      const newOrder = await processPOSOrder(vendor.id, {
+      const saleResult = await processPOSOrder(vendor.id, checkoutAttemptId, {
         vendorId: vendor.id,
         branchId: activeBranch.id,
         branchName: activeBranch.name,
         terminalId: activeTerminal.id,
         terminalName: activeTerminal.name,
-        orderNumber: `ORD-${Math.floor(10000 + Math.random() * 90000)}`,
+        orderNumber: `ORD-${checkoutAttemptId.slice(-8).toUpperCase()}`,
         items: activeCart,
         subtotal: cartTotals.subtotal,
         taxAmount: cartTotals.tax,
@@ -407,8 +512,17 @@ export default function App() {
         } : undefined
       });
 
-      // If delivery order, trigger live dispatch message to courier terminal!
-      if (deliveryDetails) {
+      if (saleResult.success === false) {
+        alert(saleResult.message);
+        return;
+      }
+
+      const newOrder = saleResult.order;
+
+      if (!saleResult.duplicate) {
+        try {
+        // If delivery order, trigger live dispatch message to courier terminal!
+        if (deliveryDetails) {
         await createDeliveryDispatch(vendor.id, {
           vendorId: vendor.id,
           orderId: newOrder.id,
@@ -432,32 +546,37 @@ export default function App() {
           `Message broadcasted to courier ${deliveryDetails.courierName} (${deliveryDetails.vehicleType.toUpperCase()} - ${deliveryDetails.vehiclePlate})!\n` +
           `"Attention ${deliveryDetails.courierName}: Order #${newOrder.orderNumber} is ready for collection at ${activeBranch.name} counter for ${paymentDetails.customerName || 'Customer'} (${deliveryDetails.deliveryAddress}). Fee: $${deliveryDetails.deliveryFee.toFixed(2)}."`
         );
-      }
+        }
 
-      // Log in BI Layer
-      await logBIEvent(
-        vendor.id,
-        'POS_TRANSACTION',
-        `Completed Order ${newOrder.orderNumber} for $${newOrder.totalAmount.toFixed(2)} (${newOrder.paymentMethod})${deliveryDetails ? ' with Courier Dispatch' : ''}`,
-        { orderId: newOrder.id, itemsCount: newOrder.items.length, total: newOrder.totalAmount, delivery: !!deliveryDetails },
-        { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role, branchId: activeBranch.id, branchName: activeBranch.name }
-      );
+        // Log in BI Layer
+        await logBIEvent(
+          vendor.id,
+          'POS_TRANSACTION',
+          `Completed Order ${newOrder.orderNumber} for $${newOrder.totalAmount.toFixed(2)} (${newOrder.paymentMethod})${deliveryDetails ? ' with Courier Dispatch' : ''}`,
+          { orderId: newOrder.id, itemsCount: newOrder.items.length, total: newOrder.totalAmount, delivery: !!deliveryDetails },
+          { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role, branchId: activeBranch.id, branchName: activeBranch.name }
+        );
 
-      // Record to active shift if present
-      if (activeShift) {
-        const updatedShift = await recordOrderToShift(vendor.id, activeShift.id, newOrder);
-        if (updatedShift) {
-          setActiveShift(updatedShift);
+        // Record to active shift if present
+        if (activeShift) {
+          const updatedShift = await recordOrderToShift(vendor.id, activeShift.id, newOrder);
+          if (updatedShift) {
+            setActiveShift(updatedShift);
+          }
+        }
+        } catch (error) {
+          console.warn('Sale committed but a post-sale activity failed:', error);
         }
       }
 
       setLastCompletedOrder(newOrder);
+      setCheckoutAttemptId(null);
       setIsPaymentModalOpen(false);
       setIsReceiptModalOpen(true);
       await refreshAllData();
     } catch (e) {
       console.error(e);
-      alert('Error saving transaction order.');
+      alert('The online sale could not be completed. No completed sale was reported.');
     }
   };
 
@@ -539,38 +658,57 @@ export default function App() {
   };
 
   // Sign Out Handler
-  const handleSignOut = () => {
-    setAuthUser(null);
-    setVendor(null);
-    setActiveStaff(null);
-    setIsStaffAuthenticated(false);
+  const handleSignOut = async () => {
+    try {
+      await firebaseSignOut(auth);
+    } catch (error) {
+      console.error('Firebase sign-out failed:', error);
+      setAuthSessionError('Sign-out could not be confirmed. Please close this session and try again.');
+    } finally {
+      setAuthUser(null);
+      setVendor(null);
+      setActiveStaff(null);
+      setIsStaffAuthenticated(false);
+    }
   };
 
   // Compute BI Insights via Analytics Engine
   const biAnalytics = processBIAnalytics(biLogs, products, orders, transfers, supplierReceipts, stockAdjustments);
-  const pendingApprovalsCount = approvalRequests.filter(r => r.status === 'pending').length;
+  const pendingApprovalsCount = approvalRequests.filter(
+    request =>
+      request.status === 'PENDING_APPROVAL' &&
+      request.notificationAudienceRoles.includes(activeStaff?.role || 'cashier'),
+  ).length;
 
-  // 1. Not Authenticated View
-  if (!authUser) {
-    return <AuthView onAuthSuccess={(u) => setAuthUser(u)} />;
+  // 1. Resolving restored Firebase session
+  if (!authResolved) {
+    return <LoadingState label="Restoring secure session…" />;
   }
 
-  // 2. Loading Profile state
-  if (loadingProfile) {
+  // 2. Not Authenticated View
+  if (!authUser) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="text-center space-y-3">
-          <div className="w-12 h-12 border-4 border-[#FF6B00] border-t-transparent rounded-full animate-spin mx-auto"></div>
-          <p className="text-sm font-bold text-slate-800">Initializing iTred BI Engine & Staff Desk...</p>
-        </div>
-      </div>
+      <AuthView
+        sessionError={authSessionError}
+        demoLoginEnabled={demoLoginEnabled}
+        onDemoSignIn={identity => {
+          if (!demoLoginEnabled) return;
+          setAuthSessionError('');
+          setAuthUser(identity);
+        }}
+      />
     );
   }
 
-  // 3. First-time Vendor Onboarding Flow
+  // 3. Loading Profile state
+  if (loadingProfile) {
+    return <LoadingState label="Initializing iTred BI Engine and staff desk…" />;
+  }
+
+  // 4. First-time Vendor Onboarding Flow
   if (showOnboarding || !vendor) {
     return (
-      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+      <div className="itred-app flex items-center justify-center p-4">
         <OnboardingModal
           isOpen={true}
           userEmail={authUser.email}
@@ -581,7 +719,7 @@ export default function App() {
     );
   }
 
-  // 4. Staff Access Form (Prompt after vendor auth)
+  // 5. Staff Access Form (Prompt after vendor auth)
   if (!isStaffAuthenticated || !activeStaff) {
     return (
       <StaffAccessForm
@@ -607,9 +745,12 @@ export default function App() {
     );
   }
 
-  // 4. Main POS & BI Architecture Dashboard
+  // 6. Main POS & BI Architecture Dashboard
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col lg:flex-row">
+    <div className="itred-app flex flex-col font-sans lg:flex-row">
+      <OfflineOperationalStateBadge
+        terminalSuspended={activeTerminal?.status === 'suspended'}
+      />
       
       {/* Menu Sidebar */}
       <Sidebar
@@ -638,7 +779,7 @@ export default function App() {
 
       {/* Main Workspace Board */}
       <div className="flex-1 flex flex-col min-w-0">
-        <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 bg-slate-50">
+        <main className="itred-workspace flex-1">
         
         {/* Desk View */}
         {activeTab === 'desk' && (
@@ -664,6 +805,7 @@ export default function App() {
             onOpenPaymentModal={(cart, totals) => {
               setActiveCart(cart);
               setCartTotals(totals);
+              setCheckoutAttemptId(`ord_${crypto.randomUUID()}`);
               setIsPaymentModalOpen(true);
             }}
             onOpenStockAdjustmentModal={() => setIsStockAdjustmentModalOpen(true)}
@@ -681,8 +823,13 @@ export default function App() {
             warehouseStock={warehouseStock}
             supplierReceipts={supplierReceipts}
             transfers={transfers}
+            vendor={vendor}
+            activeStaff={activeStaff}
+            onOpenAddWarehouseModal={() => setIsAddWarehouseModalOpen(true)}
             onOpenSupplierReceiveModal={() => setIsSupplierModalOpen(true)}
             onOpenTransferModal={() => setIsTransferModalOpen(true)}
+            onTransferSlipAction={handleTransferSlipAction}
+            onTransferUpdated={refreshAllData}
           />
         )}
 
@@ -694,8 +841,13 @@ export default function App() {
             warehouseStock={warehouseStock}
             supplierReceipts={supplierReceipts}
             transfers={transfers}
+            vendor={vendor}
+            activeStaff={activeStaff}
+            onOpenAddWarehouseModal={() => setIsAddWarehouseModalOpen(true)}
             onOpenSupplierReceiveModal={() => setIsSupplierModalOpen(true)}
             onOpenTransferModal={() => setIsTransferModalOpen(true)}
+            onTransferSlipAction={handleTransferSlipAction}
+            onTransferUpdated={refreshAllData}
           />
         )}
 
@@ -838,6 +990,15 @@ export default function App() {
         vendorId={vendor.id}
         warehouses={warehouses}
         products={products}
+        warehouseStock={warehouseStock}
+        activeStaff={activeStaff}
+        onSuccess={refreshAllData}
+      />
+
+      <AddWarehouseModal
+        isOpen={isAddWarehouseModalOpen}
+        onClose={() => setIsAddWarehouseModalOpen(false)}
+        vendorId={vendor.id}
         onSuccess={refreshAllData}
       />
 
@@ -849,6 +1010,7 @@ export default function App() {
         branches={branches}
         products={products}
         warehouseStock={warehouseStock}
+        activeStaff={activeStaff}
         onSuccess={refreshAllData}
       />
 
@@ -860,6 +1022,7 @@ export default function App() {
         activeBranchId={activeBranch?.id}
         products={products}
         branchStock={branchStock}
+        activeStaff={activeStaff}
         onSuccess={refreshAllData}
       />
 
@@ -889,7 +1052,10 @@ export default function App() {
 
       <PaymentModal
         isOpen={isPaymentModalOpen}
-        onClose={() => setIsPaymentModalOpen(false)}
+        onClose={() => {
+          setIsPaymentModalOpen(false);
+          setCheckoutAttemptId(null);
+        }}
         cartItems={activeCart}
         subtotal={cartTotals.subtotal}
         taxAmount={cartTotals.tax}

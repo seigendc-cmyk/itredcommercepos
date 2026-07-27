@@ -2,12 +2,20 @@ import React, { useState } from 'react';
 import { signInWithPopup } from 'firebase/auth';
 import { auth, googleProvider } from '../lib/firebase';
 import { Shield, Sparkles, Building2, Store, ArrowRight, CheckCircle2 } from 'lucide-react';
+import { AuthIdentity, getAuthErrorMessage } from '../auth/authPolicy';
+import { Button, Notice, Surface } from './Common/ui';
 
 interface AuthViewProps {
-  onAuthSuccess: (user: { uid: string; email: string }) => void;
+  sessionError?: string;
+  demoLoginEnabled: boolean;
+  onDemoSignIn: (user: AuthIdentity) => void;
 }
 
-export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess }) => {
+export const AuthView: React.FC<AuthViewProps> = ({
+  sessionError,
+  demoLoginEnabled,
+  onDemoSignIn,
+}) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -15,45 +23,34 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess }) => {
     setLoading(true);
     setError('');
     try {
-      const result = await signInWithPopup(auth, googleProvider);
-      if (result.user) {
-        onAuthSuccess({
-          uid: result.user.uid,
-          email: result.user.email || 'vendor@itredpos.com'
-        });
-      }
-    } catch (err: any) {
-      console.warn('Google Popup auth notice (using Google email simulation fallback):', err);
-      // Fallback for sandboxed iframe environments where popups might be blocked
-      const simulatedEmail = 'seigendc@gmail.com';
-      const simulatedUid = 'usr_' + btoa(simulatedEmail).replace(/=/g, '');
-      onAuthSuccess({
-        uid: simulatedUid,
-        email: simulatedEmail
-      });
+      await signInWithPopup(auth, googleProvider);
+    } catch (err: unknown) {
+      console.warn('Google authentication failed:', err);
+      setError(getAuthErrorMessage(err));
     } finally {
       setLoading(false);
     }
   };
 
   const handleDemoSignIn = (email: string) => {
+    if (!demoLoginEnabled) return;
     const uid = 'usr_' + btoa(email).replace(/=/g, '');
-    onAuthSuccess({ uid, email });
+    onDemoSignIn({ uid, email });
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 sm:p-6 md:p-8">
+    <main className="itred-app flex items-center justify-center p-4 sm:p-6 md:p-8">
       
       {/* Floating Auth Card */}
-      <div className="w-full max-w-md sm:max-w-lg bg-white rounded-3xl shadow-2xl border border-slate-200/90 overflow-hidden space-y-6">
+      <Surface className="w-full max-w-md overflow-hidden shadow-[var(--itred-shadow-floating)] sm:max-w-lg">
         
         {/* Header with High Density Theme Accent */}
-        <div className="bg-[#333333] text-white p-6 sm:p-8 text-center border-b-4 border-[#FF6B00]">
-          <div className="w-12 h-12 bg-[#FF6B00] text-white rounded-lg flex items-center justify-center font-bold text-xl mx-auto shadow-md mb-3">
+        <div className="border-b-4 border-[var(--itred-color-primary)] bg-[var(--itred-color-charcoal)] p-6 text-center text-white sm:p-8">
+          <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-[var(--itred-radius-sm)] bg-[var(--itred-color-primary)] text-xl font-bold text-white">
             iT
           </div>
           <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
-            iTred <span className="text-[#FF6B00]">POS</span>
+            iTred <span className="text-[var(--itred-color-primary)]">POS</span>
           </h1>
           <p className="text-xs sm:text-sm text-gray-300 mt-1 font-medium">
             Multi-Tenant Point of Sale & Inventory Platform
@@ -70,17 +67,16 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess }) => {
             </p>
           </div>
 
-          {error && (
-            <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl text-center font-medium">
-              {error}
-            </div>
+          {(error || sessionError) && (
+            <Notice tone="error" className="text-center text-xs">{error || sessionError}</Notice>
           )}
 
           {/* Primary Google Sign In Button */}
-          <button
+          <Button
             onClick={handleGoogleSignIn}
-            disabled={loading}
-            className="w-full py-3.5 px-6 bg-[#333333] hover:bg-black text-white font-bold rounded-lg shadow-md flex items-center justify-center gap-3 transition-all cursor-pointer border border-transparent hover:border-[#FF6B00] active:scale-[0.99] text-sm"
+            loading={loading}
+            variant="secondary"
+            className="w-full"
           >
             {/* Google Icon SVG */}
             <svg className="w-5 h-5" viewBox="0 0 24 24">
@@ -101,41 +97,42 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess }) => {
                 d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.37 0 3.26 2.63 1.24 6.58l4.04 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
               />
             </svg>
-            <span>{loading ? 'Authenticating Google Email...' : 'Continue with Google Account'}</span>
-          </button>
+            <span>{loading ? 'Authenticating Google email...' : 'Continue with Google account'}</span>
+          </Button>
 
-          {/* Quick Testing Options */}
-          <div className="pt-4 border-t border-slate-100 space-y-3">
-            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider text-center">
-              Quick Test Persona Sign-In
-            </p>
-            
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => handleDemoSignIn('new.vendor@itredcommerce.com')}
-                className="p-3 bg-orange-50 hover:bg-orange-100/80 text-orange-950 border border-orange-200 rounded-xl text-xs font-bold text-left transition-colors flex items-center justify-between group cursor-pointer"
-              >
-                <div>
-                  <p className="text-slate-900 font-bold">New Vendor</p>
-                  <p className="text-[10px] text-slate-600">Triggers Onboarding</p>
-                </div>
-                <ArrowRight className="w-4 h-4 text-[#FF6600] group-hover:translate-x-0.5 transition-transform" />
-              </button>
+          {demoLoginEnabled && (
+            <div className="pt-4 border-t border-slate-100 space-y-3">
+              <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider text-center">
+                Development Test Persona Sign-In
+              </p>
 
-              <button
-                type="button"
-                onClick={() => handleDemoSignIn('seigendc@gmail.com')}
-                className="p-3 bg-slate-50 hover:bg-slate-100 text-slate-900 border border-slate-200 rounded-xl text-xs font-bold text-left transition-colors flex items-center justify-between group cursor-pointer"
-              >
-                <div>
-                  <p className="text-slate-900 font-bold">Returning Vendor</p>
-                  <p className="text-[10px] text-slate-600">Opens POS Dashboard</p>
-                </div>
-                <ArrowRight className="w-4 h-4 text-[#1F242D] group-hover:translate-x-0.5 transition-transform" />
-              </button>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleDemoSignIn('new.vendor@itredcommerce.com')}
+                  className="group flex items-center justify-between rounded-[var(--itred-radius-md)] border border-orange-200 bg-[var(--itred-color-primary-soft)] p-3 text-left text-xs font-bold text-orange-950 transition-colors hover:bg-orange-100"
+                >
+                  <div>
+                    <p className="text-slate-900 font-bold">New Vendor</p>
+                    <p className="text-[10px] text-slate-600">Triggers Onboarding</p>
+                  </div>
+                  <ArrowRight className="size-4 text-[var(--itred-color-primary)] group-hover:translate-x-0.5" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleDemoSignIn('seigendc@gmail.com')}
+                  className="group flex items-center justify-between rounded-[var(--itred-radius-md)] border border-[var(--itred-color-border)] bg-[var(--itred-color-surface-subtle)] p-3 text-left text-xs font-bold text-slate-900 transition-colors hover:bg-slate-100"
+                >
+                  <div>
+                    <p className="text-slate-900 font-bold">Returning Vendor</p>
+                    <p className="text-[10px] text-slate-600">Uses Local Development Data</p>
+                  </div>
+                  <ArrowRight className="w-4 h-4 text-[#1F242D] group-hover:translate-x-0.5 transition-transform" />
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
         </div>
 
@@ -145,8 +142,8 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess }) => {
           <span>Connected to Google Cloud & Firebase Firestore Engine</span>
         </div>
 
-      </div>
+      </Surface>
 
-    </div>
+    </main>
   );
 };
