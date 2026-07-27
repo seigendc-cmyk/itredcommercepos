@@ -20,7 +20,10 @@ export type AppRouteId =
   | 'reports'
   | 'settings'
   | 'administration'
-  | 'synchronisation';
+  | 'synchronisation'
+  | 'tax-configuration'
+  | 'fiscalisation'
+  | 'bi-health';
 
 export interface AppRouteDefinition {
   id: AppRouteId;
@@ -31,6 +34,8 @@ export interface AppRouteDefinition {
   permission: AppMenuId;
   context: 'branch' | 'warehouse' | 'organisation';
   feature?: 'delivery';
+  sysadminOnly?: boolean;
+  allowedRoles?: StaffMember['role'][];
   workspaceNote?: string;
 }
 
@@ -67,7 +72,10 @@ export const APP_ROUTES: readonly AppRouteDefinition[] = [
   { id: 'reports', path: '/reports', label: 'Reports', description: 'Sales history and operational reporting.', tab: 'reports', permission: 'reports', context: 'organisation' },
   { id: 'settings', path: '/settings', label: 'System Settings', description: 'Business, hardware and governance configuration.', tab: 'settings', permission: 'settings', context: 'organisation' },
   { id: 'administration', path: '/administration', label: 'Administration', description: 'Authorised system and governance administration.', tab: 'settings', permission: 'settings', context: 'organisation', workspaceNote: 'Uses the governance section of System Settings.' },
-  { id: 'synchronisation', path: '/synchronisation', label: 'Synchronisation', description: 'Current offline operational status and configuration.', tab: 'settings', permission: 'settings', context: 'branch', workspaceNote: 'No dedicated synchronization workspace exists on this branch; mapped to System Settings.' },
+  { id: 'synchronisation', path: '/synchronisation', label: 'Synchronisation', description: 'Current offline operational status and configuration.', tab: 'settings', permission: 'settings', context: 'branch' },
+  { id: 'tax-configuration', path: '/tax-configuration', label: 'Tax, VAT & Customs', description: 'Authorised tax and product-classification configuration.', tab: 'settings', permission: 'settings', context: 'organisation', allowedRoles: ['sysadmin', 'manager'] },
+  { id: 'fiscalisation', path: '/fiscalisation', label: 'Fiscalisation Status', description: 'Commercial and statutory submission status.', tab: 'reports', permission: 'reports', context: 'organisation' },
+  { id: 'bi-health', path: '/bi-health', label: 'BI System Health', description: 'Tenant-scoped BI service and event health.', tab: 'bi_audit', permission: 'bi_audit', context: 'organisation', sysadminOnly: true },
 ] as const;
 
 const byPath = new Map(APP_ROUTES.map(route => [route.path, route]));
@@ -105,6 +113,22 @@ export function evaluateRouteAccess(
       allowed: false,
       renderUpgradeCard: false,
       message: `Your staff profile does not have permission to open ${route.label}.`,
+    };
+  }
+  if (route.sysadminOnly && staff.role !== 'sysadmin') {
+    return {
+      outcome: 'MISSING_PERMISSION',
+      allowed: false,
+      renderUpgradeCard: false,
+      message: `${route.label} is restricted to authorised system administrators.`,
+    };
+  }
+  if (route.allowedRoles && !route.allowedRoles.includes(staff.role)) {
+    return {
+      outcome: 'MISSING_PERMISSION',
+      allowed: false,
+      renderUpgradeCard: false,
+      message: `${route.label} is not authorised for your staff role.`,
     };
   }
   if (route.feature === 'delivery' && !hasDeliveryEntitlement(plan)) {

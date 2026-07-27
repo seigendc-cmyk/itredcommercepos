@@ -79,6 +79,9 @@ import { Financial } from './components/Financial/Financial';
 import { Sidebar } from './components/Sidebar';
 import { StaffAccessForm } from './components/Auth/StaffAccessForm';
 import { OfflineOperationalStateBadge } from './components/Offline/OfflineOperationalStateBadge';
+import { SynchronisationWorkspace } from './components/Offline/SynchronisationWorkspace';
+import { TaxFiscalWorkspace } from './components/Governance/TaxFiscalWorkspace';
+import { BIHealthWorkspace } from './components/BI/BIHealthWorkspace';
 import { Button, LoadingState, Notice, PageHeader, Surface } from './components/Common/ui';
 import { RouteBoundary } from './components/Common/RouteBoundary';
 import {
@@ -791,6 +794,7 @@ export default function App() {
     <div className="itred-app flex flex-col font-sans lg:flex-row">
       <OfflineOperationalStateBadge
         terminalSuspended={activeTerminal?.status === 'suspended'}
+        terminalName={activeTerminal?.name}
       />
       
       {/* Menu Sidebar */}
@@ -832,6 +836,32 @@ export default function App() {
                 : vendor.businessName
           }
           notificationCount={pendingApprovalsCount}
+          action={
+            <div className="flex flex-wrap gap-2" aria-label="System health navigation">
+              {activeStaff.grantedMenuIds.includes('settings') && (
+                <>
+                  <Button size="sm" variant="quiet" onClick={() => navigateToRoute(routeFromPath('/synchronisation'))}>
+                    Sync status
+                  </Button>
+                  {(activeStaff.role === 'sysadmin' || activeStaff.role === 'manager') && (
+                    <Button size="sm" variant="quiet" onClick={() => navigateToRoute(routeFromPath('/tax-configuration'))}>
+                      Tax & customs
+                    </Button>
+                  )}
+                </>
+              )}
+              {activeStaff.grantedMenuIds.includes('reports') && (
+                <Button size="sm" variant="quiet" onClick={() => navigateToRoute(routeFromPath('/fiscalisation'))}>
+                  Fiscal status
+                </Button>
+              )}
+              {activeStaff.role === 'sysadmin' && activeStaff.grantedMenuIds.includes('bi_audit') && (
+                <Button size="sm" variant="quiet" onClick={() => navigateToRoute(routeFromPath('/bi-health'))}>
+                  BI health
+                </Button>
+              )}
+            </div>
+          }
         />
         <RouteBoundary
           routeKey={activeRoute.id}
@@ -863,9 +893,21 @@ export default function App() {
         )}
         {routeAccess.allowed && (
         <>
+        {activeRoute.id === 'synchronisation' && (
+          <SynchronisationWorkspace activeStaff={activeStaff} terminal={activeTerminal} />
+        )}
+        {activeRoute.id === 'tax-configuration' && (
+          <TaxFiscalWorkspace view="tax" activeStaff={activeStaff} products={products} />
+        )}
+        {activeRoute.id === 'fiscalisation' && (
+          <TaxFiscalWorkspace view="fiscal" activeStaff={activeStaff} products={products} />
+        )}
+        {activeRoute.id === 'bi-health' && (
+          <BIHealthWorkspace vendorId={vendor.id} activeStaff={activeStaff} events={biLogs} />
+        )}
         
         {/* Desk View */}
-        {activeTab === 'desk' && (
+        {activeRoute.id === 'dashboard' && activeTab === 'desk' && (
           <StaffDesk
             staff={activeStaff}
             activeBranch={activeBranch}
@@ -974,7 +1016,7 @@ export default function App() {
         )}
 
         {/* Sales & Reports */}
-        {activeTab === 'reports' && activeStaff.grantedMenuIds.includes('reports') && (
+        {activeRoute.id !== 'fiscalisation' && activeTab === 'reports' && activeStaff.grantedMenuIds.includes('reports') && (
           <ReportsDashboard
             orders={orders}
             products={products}
@@ -1015,7 +1057,7 @@ export default function App() {
         )}
 
         {/* BI Audit & Brain Dashboard */}
-        {activeTab === 'bi_audit' && activeStaff.grantedMenuIds.includes('bi_audit') && (
+        {activeRoute.id !== 'bi-health' && activeTab === 'bi_audit' && activeStaff.grantedMenuIds.includes('bi_audit') && (
           <BIAuditDashboard
             logs={biLogs}
             insights={biAnalytics.insights}
@@ -1051,7 +1093,7 @@ export default function App() {
         )}
 
         {/* POS Settings Workspace */}
-        {activeTab === 'settings' && activeStaff.grantedMenuIds.includes('settings') && (
+        {!['synchronisation', 'tax-configuration'].includes(activeRoute.id) && activeTab === 'settings' && activeStaff.grantedMenuIds.includes('settings') && (
           <SettingsWorkspace
             vendor={vendor}
             activeStaff={activeStaff}

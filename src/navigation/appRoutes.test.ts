@@ -44,6 +44,29 @@ test('denies direct routes without the required menu permission', () => {
   assert.equal(evaluateRouteAccess(staff(), route, 'starter_free').outcome, 'MISSING_PERMISSION');
 });
 
+test('denies direct synchronisation and BI health routes without required authority', () => {
+  assert.equal(
+    evaluateRouteAccess(staff(), routeFromPath('/synchronisation'), 'starter_free').outcome,
+    'MISSING_PERMISSION',
+  );
+  assert.equal(
+    evaluateRouteAccess(
+      staff({ role: 'manager', grantedMenuIds: ['bi_audit'] }),
+      routeFromPath('/bi-health'),
+      'starter_free',
+    ).outcome,
+    'MISSING_PERMISSION',
+  );
+  assert.equal(
+    evaluateRouteAccess(
+      staff({ role: 'cashier', grantedMenuIds: ['settings'] }),
+      routeFromPath('/tax-configuration'),
+      'starter_free',
+    ).outcome,
+    'MISSING_PERMISSION',
+  );
+});
+
 test('delivery denial requests an upgrade card without granting access', () => {
   const route = APP_ROUTES.find(item => item.id === 'delivery')!;
   const decision = evaluateRouteAccess(
