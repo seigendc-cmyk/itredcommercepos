@@ -79,6 +79,7 @@ import { Financial } from './components/Financial/Financial';
 import { Sidebar } from './components/Sidebar';
 import { StaffAccessForm } from './components/Auth/StaffAccessForm';
 import { OfflineOperationalStateBadge } from './components/Offline/OfflineOperationalStateBadge';
+import { LoadingState } from './components/Common/ui';
 
 // Modals
 import { ReceiveSupplierStockModal } from './components/Warehouse/ReceiveSupplierStockModal';
@@ -681,14 +682,7 @@ export default function App() {
 
   // 1. Resolving restored Firebase session
   if (!authResolved) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="text-center space-y-3">
-          <div className="w-12 h-12 border-4 border-[#FF6B00] border-t-transparent rounded-full animate-spin mx-auto"></div>
-          <p className="text-sm font-bold text-slate-800">Restoring secure session...</p>
-        </div>
-      </div>
-    );
+    return <LoadingState label="Restoring secure session…" />;
   }
 
   // 2. Not Authenticated View
@@ -708,20 +702,13 @@ export default function App() {
 
   // 3. Loading Profile state
   if (loadingProfile) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="text-center space-y-3">
-          <div className="w-12 h-12 border-4 border-[#FF6B00] border-t-transparent rounded-full animate-spin mx-auto"></div>
-          <p className="text-sm font-bold text-slate-800">Initializing iTred BI Engine & Staff Desk...</p>
-        </div>
-      </div>
-    );
+    return <LoadingState label="Initializing iTred BI Engine and staff desk…" />;
   }
 
   // 4. First-time Vendor Onboarding Flow
   if (showOnboarding || !vendor) {
     return (
-      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+      <div className="itred-app flex items-center justify-center p-4">
         <OnboardingModal
           isOpen={true}
           userEmail={authUser.email}
@@ -760,7 +747,7 @@ export default function App() {
 
   // 6. Main POS & BI Architecture Dashboard
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col lg:flex-row">
+    <div className="itred-app flex flex-col font-sans lg:flex-row">
       <OfflineOperationalStateBadge
         terminalSuspended={activeTerminal?.status === 'suspended'}
       />
@@ -792,7 +779,7 @@ export default function App() {
 
       {/* Main Workspace Board */}
       <div className="flex-1 flex flex-col min-w-0">
-        <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 bg-slate-50">
+        <main className="itred-workspace flex-1">
         
         {/* Desk View */}
         {activeTab === 'desk' && (
