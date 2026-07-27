@@ -1,6 +1,12 @@
 import React, { useState } from 'react';
-import { CheckCircle2, CheckSquare, Clock, ShieldAlert, User, XCircle } from 'lucide-react';
+import { CheckCircle2, Clock, ShieldAlert, User, XCircle } from 'lucide-react';
 import { ApprovalRequest, StaffMember } from '../../types';
+import { Button, Notice, PageHeader, Surface } from '../Common/ui';
+import {
+  ApprovalDeskFilter,
+  filterApprovalRequests,
+  validateApprovalDecision,
+} from './approvalDeskPolicy';
 
 interface ApprovalsWorkspaceProps {
   vendorId: string;
@@ -14,24 +20,19 @@ interface ApprovalsWorkspaceProps {
   ) => Promise<void>;
 }
 
-type ApprovalFilter = 'PENDING_APPROVAL' | 'COMPLETED' | 'REJECTED' | 'all';
-
 export function ApprovalsWorkspace({
   approvalRequests,
   activeStaff,
   onReviewRequest,
 }: ApprovalsWorkspaceProps) {
-  const [filter, setFilter] = useState<ApprovalFilter>('PENDING_APPROVAL');
+  const [filter, setFilter] = useState<ApprovalDeskFilter>('MY_PENDING');
   const [reviewComment, setReviewComment] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState<string | null>(null);
-  const visibleRequests = approvalRequests.filter(request => {
-    const visible =
-      request.notificationAudienceRoles.includes(activeStaff.role) ||
-      request.requesterId === activeStaff.id;
-    return visible && (filter === 'all' || request.status === filter);
-  });
+  const [feedback, setFeedback] = useState<{ tone: 'success' | 'error'; message: string } | null>(null);
+  const visibleRequests = filterApprovalRequests(approvalRequests, filter, activeStaff);
   const pendingCount = approvalRequests.filter(
     request =>
+      request.vendorId === activeStaff.vendorId &&
       request.status === 'PENDING_APPROVAL' &&
       request.notificationAudienceRoles.includes(activeStaff.role),
   ).length;
@@ -40,17 +41,28 @@ export function ApprovalsWorkspace({
     request: ApprovalRequest,
     decision: 'APPROVED' | 'REJECTED' | 'CANCELLED',
   ) => {
+    const comment = reviewComment[request.id] || '';
+    const validationError = validateApprovalDecision(request, decision, comment, activeStaff);
+    if (validationError) {
+      setFeedback({ tone: 'error', message: validationError });
+      return;
+    }
     setIsSubmitting(request.id);
+    setFeedback(null);
     try {
       await onReviewRequest(
         request.id,
         decision,
         request.version,
-        reviewComment[request.id] || '',
+        comment,
       );
       setReviewComment(previous => ({ ...previous, [request.id]: '' }));
+      setFeedback({ tone: 'success', message: 'The approval decision was recorded.' });
     } catch (error) {
-      alert(error instanceof Error ? error.message : 'The approval decision failed.');
+      setFeedback({
+        tone: 'error',
+        message: error instanceof Error ? error.message : 'The approval decision failed.',
+      });
     } finally {
       setIsSubmitting(null);
     }
@@ -58,42 +70,42 @@ export function ApprovalsWorkspace({
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-gray-100">
-        <div>
-          <div className="flex items-center gap-2">
-            <CheckSquare className="w-5 h-5 text-[#FF6B00]" />
-            <h1 className="text-lg font-bold text-[#333333]">Transaction Notifications & Approvals Flow</h1>
-          </div>
-          <p className="text-xs text-gray-500 mt-0.5">
-            Authorised inventory requests are reviewed here before any atomic stock movement.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-1.5 bg-gray-100 p-1 rounded">
+      <PageHeader
+        title="Approval Desk"
+        description="Review controlled inventory requests before any atomic stock movement."
+        context={`${activeStaff.name} · ${activeStaff.role}`}
+        notificationCount={pendingCount}
+      />
+      {feedback && <Notice tone={feedback.tone}>{feedback.message}</Notice>}
+      <Surface className="p-3">
+        <div className="flex flex-wrap gap-2" role="group" aria-label="Approval filters">
           {([
-            ['PENDING_APPROVAL', `Pending (${pendingCount})`],
+            ['MY_PENDING', `My pending (${pendingCount})`],
+            ['SUBMITTED_BY_ME', 'Submitted by me'],
+            ['APPROVED', 'Approved'],
             ['COMPLETED', 'Completed'],
             ['REJECTED', 'Rejected'],
-            ['all', 'All History'],
-          ] as [ApprovalFilter, string][]).map(([value, label]) => (
-            <button
+            ['CANCELLED', 'Cancelled'],
+            ['ALL', 'All history'],
+          ] as [ApprovalDeskFilter, string][]).map(([value, label]) => (
+            <Button
               key={value}
               onClick={() => setFilter(value)}
-              className={`px-3 py-1 rounded text-xs font-bold ${
-                filter === value ? 'bg-[#333333] text-white' : 'text-gray-600 hover:text-gray-900'
-              }`}
+              variant={filter === value ? 'secondary' : 'quiet'}
+              size="sm"
+              aria-pressed={filter === value}
             >
               {label}
-            </button>
+            </Button>
           ))}
         </div>
-      </div>
+      </Surface>
 
       {pendingCount === 0 && (
-        <div className="p-3 bg-slate-50 border border-slate-200 rounded text-xs text-slate-700 flex items-center gap-2">
+        <Notice className="flex items-center gap-2">
           <ShieldAlert className="w-4 h-4 text-slate-500" />
           No pending inventory notifications are assigned to {activeStaff.name} ({activeStaff.role}).
-        </div>
+        </Notice>
       )}
 
       <div className="space-y-4">
@@ -108,7 +120,7 @@ export function ApprovalsWorkspace({
             request.notificationAudienceRoles.includes(activeStaff.role);
 
           return (
-            <div key={request.id} className="bg-white rounded-lg border border-gray-200 p-5 shadow-sm space-y-4">
+            <Surface key={request.id} className="space-y-4 p-4 sm:p-5">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-gray-100 pb-3">
                 <div className="flex items-start gap-3">
                   <div className={`w-9 h-9 rounded flex items-center justify-center ${
@@ -163,30 +175,30 @@ export function ApprovalsWorkspace({
                   />
                   <div className="flex gap-2">
                     {canCancel && (
-                      <button
+                      <Button
                         disabled={isSubmitting === request.id}
                         onClick={() => handleReview(request, 'CANCELLED')}
-                        className="px-4 py-1.5 bg-slate-600 text-white font-bold text-xs rounded disabled:opacity-50"
+                        variant="quiet" size="sm"
                       >
                         Cancel
-                      </button>
+                      </Button>
                     )}
                     {canApprove && (
                       <>
-                        <button
+                        <Button
                           disabled={isSubmitting === request.id}
                           onClick={() => handleReview(request, 'REJECTED')}
-                          className="px-4 py-1.5 bg-red-600 text-white font-bold text-xs rounded disabled:opacity-50"
+                          variant="danger" size="sm"
                         >
                           Reject
-                        </button>
-                        <button
+                        </Button>
+                        <Button
                           disabled={isSubmitting === request.id}
                           onClick={() => handleReview(request, 'APPROVED')}
-                          className="px-4 py-1.5 bg-[#FF6B00] text-white font-bold text-xs rounded disabled:opacity-50"
+                          loading={isSubmitting === request.id} size="sm"
                         >
                           Authorise & Process
-                        </button>
+                        </Button>
                       </>
                     )}
                   </div>
@@ -199,7 +211,7 @@ export function ApprovalsWorkspace({
                   <span>{request.reason}</span>
                 </div>
               )}
-            </div>
+            </Surface>
           );
         })}
 
