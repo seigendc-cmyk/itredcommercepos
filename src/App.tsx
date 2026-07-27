@@ -79,7 +79,15 @@ import { Financial } from './components/Financial/Financial';
 import { Sidebar } from './components/Sidebar';
 import { StaffAccessForm } from './components/Auth/StaffAccessForm';
 import { OfflineOperationalStateBadge } from './components/Offline/OfflineOperationalStateBadge';
-import { LoadingState } from './components/Common/ui';
+import { Button, LoadingState, Notice, PageHeader, Surface } from './components/Common/ui';
+import { RouteBoundary } from './components/Common/RouteBoundary';
+import {
+  AppRouteDefinition,
+  evaluateRouteAccess,
+  firstAuthorisedRoute,
+  routeForTab,
+  routeFromPath,
+} from './navigation/appRoutes';
 
 // Modals
 import { ReceiveSupplierStockModal } from './components/Warehouse/ReceiveSupplierStockModal';
@@ -116,7 +124,9 @@ export default function App() {
   const [isStaffAuthenticated, setIsStaffAuthenticated] = useState<boolean>(false);
 
   // App Data State
-  const [activeTab, setActiveTab] = useState<string>('desk');
+  const initialRoute = routeFromPath(window.location.pathname);
+  const [activeRoute, setActiveRoute] = useState<AppRouteDefinition>(initialRoute);
+  const [activeTab, setActiveTab] = useState<string>(initialRoute.tab);
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [terminals, setTerminals] = useState<Terminal[]>([]);
@@ -169,6 +179,35 @@ export default function App() {
     import.meta.env.DEV,
     import.meta.env.VITE_ENABLE_DEMO_LOGIN,
   );
+
+  const navigateToRoute = React.useCallback((route: AppRouteDefinition, replace = false) => {
+    setActiveRoute(route);
+    setActiveTab(route.tab);
+    if (window.location.pathname !== route.path) {
+      window.history[replace ? 'replaceState' : 'pushState']({}, '', route.path);
+    }
+  }, []);
+
+  const navigateToTab = React.useCallback((tab: string) => {
+    navigateToRoute(routeForTab(tab as AppMenuId));
+  }, [navigateToRoute]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const route = routeFromPath(window.location.pathname);
+      setActiveRoute(route);
+      setActiveTab(route.tab);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!activeStaff || !isStaffAuthenticated || !vendor) return;
+    const requestedRoute = routeFromPath(window.location.pathname);
+    setActiveRoute(requestedRoute);
+    setActiveTab(requestedRoute.tab);
+  }, [activeStaff, isStaffAuthenticated, vendor]);
 
   // Restore and monitor the Firebase session.
   useEffect(() => {
@@ -282,9 +321,6 @@ export default function App() {
       const adminStaff = staff.find(s => s.role === 'sysadmin') || staff[0];
       if (adminStaff) {
         setActiveStaff(adminStaff);
-        if (adminStaff.grantedMenuIds && adminStaff.grantedMenuIds.length > 0) {
-          setActiveTab('desk');
-        }
       } else {
         const fallbackStaff: StaffMember = {
           id: `staff_${vendorId}_sysadmin`,
@@ -362,8 +398,10 @@ export default function App() {
   // Switch Active Staff Member & adjust activeTab to match granted permissions
   const handleSwitchStaff = (staff: StaffMember) => {
     setActiveStaff(staff);
-    if (!staff.grantedMenuIds.includes(activeTab as any)) {
-      setActiveTab('desk');
+    const currentRoute = routeFromPath(window.location.pathname);
+    const decision = evaluateRouteAccess(staff, currentRoute, vendor?.subscriptionPlan);
+    if (decision.outcome !== 'ALLOWED' && decision.outcome !== 'UPGRADE_REQUIRED') {
+      navigateToRoute(firstAuthorisedRoute(staff, vendor?.subscriptionPlan), true);
     }
   };
 
@@ -731,7 +769,7 @@ export default function App() {
         onStaffAuthenticated={(staff, targetTab = 'pos') => {
           setActiveStaff(staff);
           setIsStaffAuthenticated(true);
-          setActiveTab(targetTab as AppMenuId);
+          navigateToRoute(routeForTab(targetTab as AppMenuId), true);
           logBIEvent(
             vendor.id,
             'SHIFT_OPENED',
@@ -746,6 +784,9 @@ export default function App() {
   }
 
   // 6. Main POS & BI Architecture Dashboard
+  const routeAccess = evaluateRouteAccess(activeStaff, activeRoute, vendor.subscriptionPlan);
+  const fallbackRoute = firstAuthorisedRoute(activeStaff, vendor.subscriptionPlan);
+
   return (
     <div className="itred-app flex flex-col font-sans lg:flex-row">
       <OfflineOperationalStateBadge
@@ -759,7 +800,7 @@ export default function App() {
         staffList={staffList}
         onSwitchStaff={handleSwitchStaff}
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={navigateToTab}
         branches={branches}
         activeBranch={activeBranch}
         setActiveBranch={(b) => {
@@ -780,6 +821,48 @@ export default function App() {
       {/* Main Workspace Board */}
       <div className="flex-1 flex flex-col min-w-0">
         <main className="itred-workspace flex-1">
+        <PageHeader
+          title={activeRoute.label}
+          description={activeRoute.description}
+          context={
+            activeRoute.context === 'warehouse'
+              ? warehouses[0]?.name || 'No active warehouse'
+              : activeRoute.context === 'branch'
+                ? `${activeBranch?.name || 'No active branch'}${activeTerminal ? ` · ${activeTerminal.name}` : ''}`
+                : vendor.businessName
+          }
+          notificationCount={pendingApprovalsCount}
+        />
+        <RouteBoundary
+          routeKey={activeRoute.id}
+          onReturnToDashboard={() => navigateToRoute(fallbackRoute)}
+        >
+        {!routeAccess.allowed && !routeAccess.renderUpgradeCard && (
+          <Surface className="mx-auto max-w-2xl p-5 sm:p-6">
+            <h2 className="text-lg font-bold text-[var(--itred-color-charcoal)]">Access denied</h2>
+            <Notice tone="error" className="mt-3">
+              {routeAccess.message}
+            </Notice>
+            <Button className="mt-4" variant="secondary" onClick={() => navigateToRoute(fallbackRoute)}>
+              Return to an authorised workspace
+            </Button>
+          </Surface>
+        )}
+        {routeAccess.renderUpgradeCard && (
+          <Surface className="mx-auto max-w-2xl p-5 sm:p-6">
+            <h2 className="text-lg font-bold text-[var(--itred-color-charcoal)]">Delivery add-on required</h2>
+            <Notice tone="info" className="mt-3">
+              {routeAccess.message} No delivery resource or assignment has been activated.
+            </Notice>
+            {activeStaff.grantedMenuIds.includes('billing') && (
+              <Button className="mt-4" onClick={() => setIsUpgradeModalOpen(true)}>
+                View upgrade options
+              </Button>
+            )}
+          </Surface>
+        )}
+        {routeAccess.allowed && (
+        <>
         
         {/* Desk View */}
         {activeTab === 'desk' && (
@@ -788,7 +871,7 @@ export default function App() {
             activeBranch={activeBranch}
             activeTerminal={activeTerminal}
             pendingApprovalsCount={pendingApprovalsCount}
-            onNavigate={(tab) => setActiveTab(tab)}
+            onNavigate={navigateToTab}
           />
         )}
 
@@ -886,7 +969,7 @@ export default function App() {
               setIsProductModalOpen(true);
             }}
             onSubmitStocktakeApproval={handleSubmitStocktakeApproval}
-            onNavigateToApprovals={() => setActiveTab('approvals')}
+            onNavigateToApprovals={() => navigateToTab('approvals')}
           />
         )}
 
@@ -979,6 +1062,9 @@ export default function App() {
             onLogBIEvent={(evt, desc, meta) => logBIEvent(vendor.id, evt as BIEventType, desc, meta, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role })}
           />
         )}
+        </>
+        )}
+        </RouteBoundary>
 
       </main>
       </div>

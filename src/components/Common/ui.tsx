@@ -128,3 +128,50 @@ export const LoadingState: React.FC<{ label: string }> = ({ label }) => (
     </div>
   </div>
 );
+
+export interface PageHeaderProps {
+  title: string;
+  description: string;
+  context?: string;
+  notificationCount?: number;
+  action?: React.ReactNode;
+  loading?: boolean;
+  error?: string;
+}
+
+export const PageHeader: React.FC<PageHeaderProps> = ({
+  title,
+  description,
+  context,
+  notificationCount = 0,
+  action,
+  loading = false,
+  error,
+}) => (
+  <header className="mb-5 border-b border-[var(--itred-color-border)] bg-white px-4 py-4 sm:px-5">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-xl font-bold text-[var(--itred-color-charcoal)]">{title}</h1>
+          {notificationCount > 0 && (
+            <span
+              className="rounded-[var(--itred-radius-sm)] bg-[var(--itred-color-primary)] px-2 py-0.5 text-xs font-bold text-white"
+              aria-label={`${notificationCount} unread notifications`}
+            >
+              {notificationCount}
+            </span>
+          )}
+          {loading && (
+            <span className="text-xs font-semibold text-[var(--itred-color-text-muted)]" role="status">
+              Loading…
+            </span>
+          )}
+        </div>
+        <p className="mt-1 text-sm text-[var(--itred-color-text-muted)]">{description}</p>
+        {context && <p className="mt-1 text-xs font-semibold text-slate-500">Context: {context}</p>}
+        {error && <Notice tone="error" className="mt-3">{error}</Notice>}
+      </div>
+      {action && <div className="shrink-0">{action}</div>}
+    </div>
+  </header>
+);

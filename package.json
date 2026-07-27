@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/auth/authPolicy.test.ts src/services/inventoryApprovalWorkflow.test.ts src/services/resourceEntitlements.test.ts src/services/saleTransaction.test.ts src/services/transferSlip.test.ts src/services/supplierReceiving.test.ts src/services/stockTransferWorkflow.test.ts src/offline/offlineDatabase.test.ts src/offline/offlineCheckout.test.ts"
+    "test": "tsx --test src/auth/authPolicy.test.ts src/navigation/appRoutes.test.ts src/services/inventoryApprovalWorkflow.test.ts src/services/resourceEntitlements.test.ts src/services/saleTransaction.test.ts src/services/transferSlip.test.ts src/services/supplierReceiving.test.ts src/services/stockTransferWorkflow.test.ts src/offline/offlineDatabase.test.ts src/offline/offlineCheckout.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
