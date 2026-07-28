@@ -99,6 +99,11 @@ import {
   TransferDraftLine,
   validateTransferReceipt,
 } from './stockTransferWorkflow';
+import {
+  MENU_GRANT_SCHEMA_VERSION,
+  migrateStaffMenuGrantRecords,
+  StaffMenuGrantMigrationReport,
+} from './staffMenuGrantMigration';
 
 // Helper for local caching/fallback to ensure snappy preview & offline resiliency
 const LOCAL_STORAGE_KEY = 'itred_pos_vendor_data_';
@@ -1690,6 +1695,7 @@ export function getDefaultStaffList(vendorId: string, vendorEmail: string): Staf
       pinCode: '1234',
       createdAt: now,
       lastActiveAt: now,
+      menuGrantSchemaVersion: MENU_GRANT_SCHEMA_VERSION,
     },
     {
       id: `staff_${vendorId}_manager`,
@@ -1702,6 +1708,7 @@ export function getDefaultStaffList(vendorId: string, vendorEmail: string): Staf
       status: 'active',
       pinCode: '1234',
       createdAt: now,
+      menuGrantSchemaVersion: MENU_GRANT_SCHEMA_VERSION,
     },
     {
       id: `staff_${vendorId}_cashier`,
@@ -1714,6 +1721,7 @@ export function getDefaultStaffList(vendorId: string, vendorEmail: string): Staf
       status: 'active',
       pinCode: '1234',
       createdAt: now,
+      menuGrantSchemaVersion: MENU_GRANT_SCHEMA_VERSION,
     },
     {
       id: `staff_${vendorId}_warehouse`,
@@ -1726,6 +1734,7 @@ export function getDefaultStaffList(vendorId: string, vendorEmail: string): Staf
       status: 'active',
       pinCode: '1234',
       createdAt: now,
+      menuGrantSchemaVersion: MENU_GRANT_SCHEMA_VERSION,
     }
   ];
 }
@@ -1746,7 +1755,8 @@ export async function fetchStaffMembers(vendorId: string, userEmail: string = ''
           role: 'sysadmin',
           grantedMenuIds: DEFAULT_ROLE_MENUS.sysadmin,
           status: 'active',
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          menuGrantSchemaVersion: MENU_GRANT_SCHEMA_VERSION,
         };
         list.unshift(sysAdmin);
       }
@@ -1777,6 +1787,33 @@ export async function fetchStaffMembers(vendorId: string, userEmail: string = ''
   return defaultStaff;
 }
 
+export async function migratePersistedStaffMenuGrants(
+  vendorId: string,
+  staffRecords: StaffMember[],
+): Promise<StaffMenuGrantMigrationReport> {
+  const report = await migrateStaffMenuGrantRecords(
+    vendorId,
+    staffRecords,
+    async migratedStaff => {
+      await setDoc(
+        doc(db, 'vendors', vendorId, 'staff', migratedStaff.id),
+        {
+          grantedMenuIds: migratedStaff.grantedMenuIds,
+          menuGrantSchemaVersion: migratedStaff.menuGrantSchemaVersion,
+        },
+        { merge: true },
+      );
+    },
+  );
+
+  const vendorRecords = report.records.filter(staff => staff.vendorId === vendorId);
+  localStorage.setItem(
+    `${LOCAL_STORAGE_KEY}_staff_${vendorId}`,
+    JSON.stringify(vendorRecords),
+  );
+  return { ...report, records: vendorRecords };
+}
+
 // Save or Update Staff Member
 export async function saveStaffMember(vendorId: string, staffData: Partial<StaffMember>): Promise<StaffMember> {
   const now = new Date().toISOString();
@@ -1801,6 +1838,7 @@ export async function saveStaffMember(vendorId: string, staffData: Partial<Staff
     pinCode: staffData.pinCode || '1234',
     createdAt: staffData.createdAt || now,
     lastActiveAt: now,
+    menuGrantSchemaVersion: staffData.menuGrantSchemaVersion ?? MENU_GRANT_SCHEMA_VERSION,
   };
 
   try {

@@ -1,0 +1,75 @@
+﻿
+> export async function fetchCustomers(vendorId: string): Promise<Customer[]> {
+    try {
+      const raw = localStorage.getItem(`${LOCAL_STORAGE_KEY}_customers_${vendorId}`);
+      if (raw) {
+        return JSON.parse(raw);
+      }
+    } catch (e) {
+      console.warn('localStorage fetchCustomers error:', e);
+    }
+> export async function saveCustomer(
+    vendorId: string, 
+    customerData: Omit<Customer, 'id' | 'vendorId' | 'createdAt' | 'updatedAt' | 'currentBalance'> & { id?: string; currentBalance?: number }
+  ): Promise<Customer> {
+    const customers = await fetchCustomers(vendorId);
+    const now = new Date().toISOString();
+  
+    let updatedCust: Customer;
+    if (customerData.id) {
+> export async function fetchCreditSales(vendorId: string): Promise<CreditSale[]> {
+    try {
+      const raw = localStorage.getItem(`${LOCAL_STORAGE_KEY}_credit_sales_${vendorId}`);
+      if (raw) {
+        return JSON.parse(raw);
+      }
+    } catch (e) {
+      console.warn('localStorage fetchCreditSales error:', e);
+    }
+> export async function createCreditSale(
+    vendorId: string, 
+    saleData: Omit<CreditSale, 'id' | 'vendorId' | 'paidAmount' | 'balanceAmount' | 'status' | 'createdAt' | 'updatedAt'>
+  ): Promise<CreditSale> {
+    const sales = await fetchCreditSales(vendorId);
+    const customers = await fetchCustomers(vendorId);
+    const now = new Date().toISOString();
+  
+    const newSale: CreditSale = {
+> export async function fetchCreditPayments(vendorId: string): Promise<CreditPayment[]> {
+    try {
+      const raw = localStorage.getItem(`${LOCAL_STORAGE_KEY}_credit_payments_${vendorId}`);
+      if (raw) {
+        return JSON.parse(raw);
+      }
+    } catch (e) {
+      console.warn('localStorage fetchCreditPayments error:', e);
+    }
+> export async function recordCreditPayment(
+    vendorId: string, 
+    paymentData: Omit<CreditPayment, 'id' | 'vendorId' | 'createdAt'>
+  ): Promise<CreditPayment> {
+    const payments = await fetchCreditPayments(vendorId);
+    const sales = await fetchCreditSales(vendorId);
+    const customers = await fetchCustomers(vendorId);
+    const coaList = await fetchChartOfAccounts(vendorId);
+    const now = new Date().toISOString();
+> export async function fetchCollectionActivities(vendorId: string): Promise<CollectionActivity[]> {
+    try {
+      const raw = localStorage.getItem(`${LOCAL_STORAGE_KEY}_collections_${vendorId}`);
+      if (raw) {
+        return JSON.parse(raw);
+      }
+    } catch (e) {
+      console.warn('localStorage fetchCollectionActivities error:', e);
+    }
+> export async function logCollectionActivity(
+    vendorId: string, 
+    activityData: Omit<CollectionActivity, 'id' | 'vendorId' | 'createdAt'>
+  ): Promise<CollectionActivity> {
+    const activities = await fetchCollectionActivities(vendorId);
+    const now = new Date().toISOString();
+  
+    const newActivity: CollectionActivity = {
+      ...activityData,
+
+

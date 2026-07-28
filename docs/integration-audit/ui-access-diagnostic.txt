@@ -1,0 +1,121 @@
+﻿=== NAVIGATION MISMATCHES ===
+
+MenuId              InAppRender InSidebar Status                        
+------              ----------- --------- ------                        
+bi_governance       False       True      NAVIGATION_WITHOUT_RENDER_PATH
+inventory_logistics False       True      NAVIGATION_WITHOUT_RENDER_PATH
+sales_desk          False       True      NAVIGATION_WITHOUT_RENDER_PATH
+store_branch        False       True      NAVIGATION_WITHOUT_RENDER_PATH
+
+
+
+
+=== APP RENDER CONDITIONS ===
+{activeTab === 'desk' && (
+{activeTab === 'pos' && (!activeStaff.grantedMenuIds || activeStaff.grantedMenuIds.length === 0 || activeStaff.grantedMenuIds.includes('pos')) && (
+{activeTab === 'warehouse' && activeStaff.grantedMenuIds.includes('warehouse') && (
+{activeTab === 'transfers' && activeStaff.grantedMenuIds.includes('transfers') && (
+{activeTab === 'branches' && activeStaff.grantedMenuIds.includes('branches') && (
+{activeTab === 'products' && activeStaff.grantedMenuIds.includes('products') && (
+{activeTab === 'reports' && activeStaff.grantedMenuIds.includes('reports') && (
+{activeTab === 'financial' && (
+{activeTab === 'approvals' && activeStaff.grantedMenuIds.includes('approvals') && (
+{activeTab === 'staff' && activeStaff.grantedMenuIds.includes('staff') && (
+{activeTab === 'bi_audit' && activeStaff.grantedMenuIds.includes('bi_audit') && (
+{activeTab === 'delivery' && (
+{activeTab === 'billing' && activeStaff.grantedMenuIds.includes('billing') && (
+{activeTab === 'settings' && activeStaff.grantedMenuIds.includes('settings') && (
+
+=== SIDEBAR MENU IDS ===
+approvals
+bi_audit
+bi_governance
+billing
+branches
+delivery
+desk
+financial
+inventory_logistics
+pos
+products
+reports
+sales_desk
+settings
+staff
+store_branch
+transfers
+warehouse
+
+=== PERMISSION REFERENCES ===
+
+Path                                                                    LineNumber Line                                                                                                                       
+----                                                                    ---------- ----                                                                                                                       
+D:\ICP\itred-commerce-pos\src\components\Auth\StaffAccessForm.tsx                2 import { StaffMember, VendorProfile, Branch, AppMenuId } from '../../types';                                               
+D:\ICP\itred-commerce-pos\src\components\Auth\StaffAccessForm.tsx               11   onStaffAuthenticated: (staff: StaffMember, targetTab?: AppMenuId) => void;                                               
+D:\ICP\itred-commerce-pos\src\components\Auth\StaffAccessForm.tsx               44   const handleAuthenticate = (e?: React.FormEvent, targetTab: AppMenuId = 'pos') => {                                      
+D:\ICP\itred-commerce-pos\src\components\legacy\Navbar.tsx                      22 import { VendorProfile, Branch, Terminal, Warehouse, StaffMember, AppMenuId } from '../types';                             
+D:\ICP\itred-commerce-pos\src\components\legacy\Navbar.tsx                      45 const TAB_CONFIG: Record<AppMenuId, { label: string; icon: React.ReactNode }> = {                                          
+D:\ICP\itred-commerce-pos\src\components\legacy\Navbar.tsx                     173               {activeStaff.grantedMenuIds.includes('warehouse') && (                                                       
+D:\ICP\itred-commerce-pos\src\components\legacy\Navbar.tsx                     184               {activeStaff.grantedMenuIds.includes('transfers') && (                                                       
+D:\ICP\itred-commerce-pos\src\components\legacy\Navbar.tsx                     195               {activeStaff.grantedMenuIds.includes('branches') && (                                                        
+D:\ICP\itred-commerce-pos\src\components\Settings\SettingsWorkspace.tsx          6   AppMenuId,                                                                                                               
+D:\ICP\itred-commerce-pos\src\components\Settings\SettingsWorkspace.tsx         52 const ALL_MENUS: { id: AppMenuId; label: string; description: string }[] = [                                               
+D:\ICP\itred-commerce-pos\src\components\Settings\SettingsWorkspace.tsx        126   const [newRoleMenus, setNewRoleMenus] = useState<AppMenuId[]>(['desk', 'pos', 'reports']);                               
+D:\ICP\itred-commerce-pos\src\components\Settings\SettingsWorkspace.tsx        186   const handleToggleRoleMenu = (menuId: AppMenuId) => {                                                                    
+D:\ICP\itred-commerce-pos\src\components\Settings\SettingsWorkspace.tsx        188     const currentMenus = selectedRole.defaultGrantedMenuIds;                                                               
+D:\ICP\itred-commerce-pos\src\components\Settings\SettingsWorkspace.tsx        195       defaultGrantedMenuIds: updatedMenus                                                                                  
+D:\ICP\itred-commerce-pos\src\components\Settings\SettingsWorkspace.tsx        215       defaultGrantedMenuIds: newRoleMenus,                                                                                 
+D:\ICP\itred-commerce-pos\src\components\Settings\SettingsWorkspace.tsx        239     const grantedMenuIds = matchedRole ? matchedRole.defaultGrantedMenuIds : ['desk', 'pos', 'reports'];                   
+D:\ICP\itred-commerce-pos\src\components\Settings\SettingsWorkspace.tsx        540                       <span>{r.defaultGrantedMenuIds.length} Menus Granted</span>                                          
+D:\ICP\itred-commerce-pos\src\components\Settings\SettingsWorkspace.tsx        597                       Granted Navigation Menus ({selectedRole.defaultGrantedMenuIds.length} Enabled)                       
+D:\ICP\itred-commerce-pos\src\components\Settings\SettingsWorkspace.tsx        602                         const isChecked = selectedRole.defaultGrantedMenuIds.includes(m.id);                               
+D:\ICP\itred-commerce-pos\src\components\Staff\StaffDesk.tsx                     2 import { StaffMember, AppMenuId, AppMenuDefinition, Branch, Terminal } from '../../types';                                 
+D:\ICP\itred-commerce-pos\src\components\Staff\StaffDesk.tsx                    32 const MENU_DEFINITIONS: Record<AppMenuId, AppMenuDefinition> = {                                                           
+D:\ICP\itred-commerce-pos\src\components\Staff\StaffDesk.tsx                    50 const MENU_ICONS: Record<AppMenuId, React.ReactNode> = {                                                                   
+D:\ICP\itred-commerce-pos\src\components\Staff\StaffManagement.tsx               2 import { StaffMember, StaffRole, AppMenuId, Branch } from '../../types';                                                   
+D:\ICP\itred-commerce-pos\src\components\Staff\StaffManagement.tsx              28 const ALL_MENUS: { id: AppMenuId; label: string; description: string }[] = [                                               
+D:\ICP\itred-commerce-pos\src\components\Staff\StaffManagement.tsx              63   const [selectedMenus, setSelectedMenus] = useState<AppMenuId[]>(['desk', 'pos', 'reports']);                             
+D:\ICP\itred-commerce-pos\src\components\Staff\StaffManagement.tsx             103   const toggleMenuPermission = (menuId: AppMenuId) => {                                                                    
+D:\ICP\itred-commerce-pos\src\components\Staff\StaffManagement.tsx             129       grantedMenuIds: selectedMenus.length > 0 ? selectedMenus : ['desk'],                                                 
+D:\ICP\itred-commerce-pos\src\components\Sidebar.tsx                            29 import { VendorProfile, Branch, Terminal, Warehouse, StaffMember, AppMenuId } from '../types';                             
+D:\ICP\itred-commerce-pos\src\components\Sidebar.tsx                            55     id: AppMenuId;                                                                                                         
+D:\ICP\itred-commerce-pos\src\components\Sidebar.tsx                           126   const findGroupIdForTab = (tabId: AppMenuId): string => {                                                                
+D:\ICP\itred-commerce-pos\src\components\Sidebar.tsx                           232           const visibleItems = group.items.filter(item => activeStaff.grantedMenuIds.includes(item.id));                   
+D:\ICP\itred-commerce-pos\src\components\Sidebar.tsx                           313           {activeStaff.grantedMenuIds.includes('warehouse') && (                                                           
+D:\ICP\itred-commerce-pos\src\components\Sidebar.tsx                           323           {activeStaff.grantedMenuIds.includes('transfers') && (                                                           
+D:\ICP\itred-commerce-pos\src\components\Sidebar.tsx                           333           {activeStaff.grantedMenuIds.includes('branches') && (                                                            
+D:\ICP\itred-commerce-pos\src\services\db.ts                                    30   AppMenuId,                                                                                                               
+D:\ICP\itred-commerce-pos\src\services\db.ts                                  1671 export const DEFAULT_ROLE_MENUS: Record<StaffRole, AppMenuId[]> = {                                                        
+D:\ICP\itred-commerce-pos\src\services\db.ts                                  1688       grantedMenuIds: DEFAULT_ROLE_MENUS.sysadmin,                                                                         
+D:\ICP\itred-commerce-pos\src\services\db.ts                                  1701       grantedMenuIds: DEFAULT_ROLE_MENUS.manager,                                                                          
+D:\ICP\itred-commerce-pos\src\services\db.ts                                  1713       grantedMenuIds: DEFAULT_ROLE_MENUS.cashier,                                                                          
+D:\ICP\itred-commerce-pos\src\services\db.ts                                  1725       grantedMenuIds: DEFAULT_ROLE_MENUS.warehouse_staff,                                                                  
+D:\ICP\itred-commerce-pos\src\services\db.ts                                  1747           grantedMenuIds: DEFAULT_ROLE_MENUS.sysadmin,                                                                     
+D:\ICP\itred-commerce-pos\src\services\db.ts                                  1797     grantedMenuIds: staffData.grantedMenuIds && staffData.grantedMenuIds.length > 0                                        
+D:\ICP\itred-commerce-pos\src\services\db.ts                                  2648       defaultGrantedMenuIds: ['desk', 'pos', 'warehouse', 'transfers', 'branches', 'products', 'reports', 'approvals', '...
+D:\ICP\itred-commerce-pos\src\services\db.ts                                  2656       defaultGrantedMenuIds: ['desk', 'pos', 'warehouse', 'transfers', 'branches', 'products', 'reports', 'approvals', '...
+D:\ICP\itred-commerce-pos\src\services\db.ts                                  2664       defaultGrantedMenuIds: ['desk', 'pos', 'reports'],                                                                   
+D:\ICP\itred-commerce-pos\src\services\db.ts                                  2672       defaultGrantedMenuIds: ['desk', 'warehouse', 'transfers', 'products', 'approvals'],                                  
+D:\ICP\itred-commerce-pos\src\types\index.ts                                    88   defaultGrantedMenuIds: AppMenuId[];                                                                                      
+D:\ICP\itred-commerce-pos\src\types\index.ts                                   391 export type AppMenuId =                                                                                                    
+D:\ICP\itred-commerce-pos\src\types\index.ts                                   483   id: AppMenuId;                                                                                                           
+D:\ICP\itred-commerce-pos\src\types\index.ts                                   498   grantedMenuIds: AppMenuId[];                                                                                             
+D:\ICP\itred-commerce-pos\src\App.tsx                                           16   AppMenuId,                                                                                                               
+D:\ICP\itred-commerce-pos\src\App.tsx                                          293           grantedMenuIds: ['desk', 'pos', 'warehouse', 'transfers', 'branches', 'products', 'reports', 'approvals', 'sta...
+D:\ICP\itred-commerce-pos\src\App.tsx                                          329           grantedMenuIds: ['desk', 'pos', 'warehouse', 'transfers', 'branches', 'products', 'reports', 'approvals', 'sta...
+D:\ICP\itred-commerce-pos\src\App.tsx                                          363     if (!staff.grantedMenuIds.includes(activeTab as any)) {                                                                
+D:\ICP\itred-commerce-pos\src\App.tsx                                          746           setActiveTab(targetTab as AppMenuId);                                                                            
+D:\ICP\itred-commerce-pos\src\App.tsx                                          808         {activeTab === 'pos' && (!activeStaff.grantedMenuIds || activeStaff.grantedMenuIds.length === 0 || activeStaff.g...
+D:\ICP\itred-commerce-pos\src\App.tsx                                          831         {activeTab === 'warehouse' && activeStaff.grantedMenuIds.includes('warehouse') && (                                
+D:\ICP\itred-commerce-pos\src\App.tsx                                          849         {activeTab === 'transfers' && activeStaff.grantedMenuIds.includes('transfers') && (                                
+D:\ICP\itred-commerce-pos\src\App.tsx                                          867         {activeTab === 'branches' && activeStaff.grantedMenuIds.includes('branches') && (                                  
+D:\ICP\itred-commerce-pos\src\App.tsx                                          882         {activeTab === 'products' && activeStaff.grantedMenuIds.includes('products') && (                                  
+D:\ICP\itred-commerce-pos\src\App.tsx                                          906         {activeTab === 'reports' && activeStaff.grantedMenuIds.includes('reports') && (                                    
+D:\ICP\itred-commerce-pos\src\App.tsx                                          925         {activeTab === 'approvals' && activeStaff.grantedMenuIds.includes('approvals') && (                                
+D:\ICP\itred-commerce-pos\src\App.tsx                                          935         {activeTab === 'staff' && activeStaff.grantedMenuIds.includes('staff') && (                                        
+D:\ICP\itred-commerce-pos\src\App.tsx                                          947         {activeTab === 'bi_audit' && activeStaff.grantedMenuIds.includes('bi_audit') && (                                  
+D:\ICP\itred-commerce-pos\src\App.tsx                                          974         {activeTab === 'billing' && activeStaff.grantedMenuIds.includes('billing') && (                                    
+D:\ICP\itred-commerce-pos\src\App.tsx                                          983         {activeTab === 'settings' && activeStaff.grantedMenuIds.includes('settings') && (                                  
+
+
+

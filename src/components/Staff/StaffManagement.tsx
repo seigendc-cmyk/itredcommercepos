@@ -15,12 +15,14 @@ import {
   Mail,
   Phone
 } from 'lucide-react';
+import { APPROVED_ROLE_MENU_POLICIES } from '../../services/staffMenuGrantMigration';
 
 interface StaffManagementProps {
   vendorId: string;
   staffList: StaffMember[];
   branches: Branch[];
   activeStaff: StaffMember;
+  migrationError?: string;
   onSwitchStaff: (staff: StaffMember) => void;
   onSaveStaff: (staffData: Partial<StaffMember>) => Promise<void>;
 }
@@ -34,6 +36,7 @@ const ALL_MENUS: { id: AppMenuId; label: string; description: string }[] = [
   { id: 'branches', label: 'Branches & Terminals', description: 'Branch store location setup' },
   { id: 'products', label: 'Products Catalog', description: 'Master product item list' },
   { id: 'financial', label: 'Financial & Check Writer', description: 'Chart of accounts, protected COGS reserves & check writer' },
+  { id: 'customers', label: 'Customers & CRM', description: 'Customer accounts, credit exposure & collection history' },
   { id: 'reports', label: 'Sales & Reports', description: 'Order history & analytics' },
   { id: 'approvals', label: 'Approvals & Workflows', description: 'Strict transaction authorization' },
   { id: 'staff', label: 'Staff Management', description: 'Sysadmin user permissions & roles' },
@@ -42,11 +45,18 @@ const ALL_MENUS: { id: AppMenuId; label: string; description: string }[] = [
   { id: 'settings', label: 'POS Settings & Hardware', description: 'Business profile, tax, hardware & roles' },
 ];
 
+export function getStaffMenuCountLabel(staff: StaffMember): string {
+  return staff.role === 'sysadmin'
+    ? `${staff.grantedMenuIds.length}/${ALL_MENUS.length} Menus`
+    : `${staff.grantedMenuIds.length} Menus`;
+}
+
 export function StaffManagement({
   vendorId,
   staffList,
   branches,
   activeStaff,
+  migrationError,
   onSwitchStaff,
   onSaveStaff,
 }: StaffManagementProps) {
@@ -88,16 +98,7 @@ export function StaffManagement({
 
   const handleRoleChange = (newRole: StaffRole) => {
     setRole(newRole);
-    // Apply default presets for the role
-    if (newRole === 'sysadmin') {
-      setSelectedMenus(ALL_MENUS.map(m => m.id));
-    } else if (newRole === 'manager') {
-      setSelectedMenus(['desk', 'pos', 'warehouse', 'transfers', 'branches', 'products', 'reports', 'approvals']);
-    } else if (newRole === 'cashier') {
-      setSelectedMenus(['desk', 'pos', 'reports']);
-    } else if (newRole === 'warehouse_staff') {
-      setSelectedMenus(['desk', 'warehouse', 'transfers', 'products', 'approvals']);
-    }
+    setSelectedMenus([...APPROVED_ROLE_MENU_POLICIES[newRole]]);
   };
 
   const toggleMenuPermission = (menuId: AppMenuId) => {
@@ -158,6 +159,12 @@ export function StaffManagement({
         </button>
       </div>
 
+      {migrationError && (
+        <div role="alert" className="border border-amber-300 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-800">
+          {migrationError}
+        </div>
+      )}
+
       {/* Profile Switcher Quick Bar */}
       <div className="p-4 bg-gray-50 rounded-lg border border-gray-200/80 space-y-3">
         <div className="flex items-center justify-between">
@@ -186,7 +193,9 @@ export function StaffManagement({
                     {s.name}
                     {isCurrent && <span className="w-2 h-2 rounded-full bg-[#FF6B00]"></span>}
                   </p>
-                  <p className="text-[10px] text-gray-500 capitalize">{s.role.replace('_', ' ')} • {s.grantedMenuIds.length} Menus</p>
+                  <p className="text-[10px] text-gray-500 capitalize">
+                    {s.role.replace('_', ' ')} | {getStaffMenuCountLabel(s)}
+                  </p>
                 </div>
 
                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${

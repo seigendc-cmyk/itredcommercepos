@@ -500,6 +500,7 @@ export interface StaffMember {
   pinCode?: string;
   createdAt: string;
   lastActiveAt?: string;
+  menuGrantSchemaVersion?: number;
 }
 
 export type ApprovalRequestType =

@@ -1,25 +1,48 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
-import firebaseConfigData from '../../firebase-applet-config.json';
+﻿import { getApp, getApps, initializeApp } from "firebase/app";
+import {
+  getAuth,
+  GoogleAuthProvider,
+} from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
+import { getStorage } from "firebase/storage";
+import {
+  requireFirebaseConfiguration,
+  resolveFirebaseEnvironment,
+} from "../config/firebaseEnvironment";
 
-const firebaseConfig = {
-  apiKey: firebaseConfigData.apiKey,
-  authDomain: firebaseConfigData.authDomain,
-  projectId: firebaseConfigData.projectId,
-  storageBucket: firebaseConfigData.storageBucket,
-  messagingSenderId: firebaseConfigData.messagingSenderId,
-  appId: firebaseConfigData.appId,
-};
+const processEnvironment = (
+  typeof process !== "undefined" ? process.env : {}
+);
 
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+const viteEnvironment = import.meta.env ?? {};
+const runtimeEnvironment = resolveFirebaseEnvironment(
+  processEnvironment,
+  viteEnvironment,
+);
+const { firebaseConfig, databaseId: configuredDatabaseId } =
+  requireFirebaseConfiguration(runtimeEnvironment);
+
+export const app =
+  getApps().length > 0
+    ? getApp()
+    : initializeApp(firebaseConfig);
 
 export const auth = getAuth(app);
+
 export const googleProvider = new GoogleAuthProvider();
 
-// Custom database ID if specified in config, else default
-export const db = firebaseConfigData.firestoreDatabaseId && firebaseConfigData.firestoreDatabaseId !== ''
-  ? getFirestore(app, firebaseConfigData.firestoreDatabaseId)
-  : getFirestore(app);
+googleProvider.setCustomParameters({
+  prompt: "select_account",
+});
+
+export const databaseId =
+  configuredDatabaseId ||
+  "ai-studio-6dd086fa-b537-4e03-b916-32eee1121008";
+
+export const db = getFirestore(app, databaseId);
+export const storage = getStorage(app);
+
+export const firebaseProjectId =
+  firebaseConfig.projectId;
 
 export default app;
