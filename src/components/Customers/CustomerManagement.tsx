@@ -14,7 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { Customer, CreditPayment, CreditSale, CollectionActivity } from '../../types';
-import { saveCustomer } from '../../services/db';
+import type { saveCustomer } from '../../services/db';
 
 export type CustomerSaveInput = Parameters<typeof saveCustomer>[1];
 
