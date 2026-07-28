@@ -1,6 +1,6 @@
 ﻿import React, { useState, useEffect } from 'react';
 import { onAuthStateChanged, signOut as firebaseSignOut } from 'firebase/auth';
-import { 
+import {
   VendorProfile, 
   Warehouse, 
   Branch, 
@@ -114,6 +114,7 @@ import {
   createCanonicalSysadminFallback,
   resolveStaffNavigationAfterMigration,
 } from './services/staffMenuGrantMigration';
+import { useConsoleApplicationInstance } from './hooks/useConsoleApplicationInstance';
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -209,6 +210,17 @@ export default function App() {
     import.meta.env.DEV,
     import.meta.env.VITE_ENABLE_DEMO_LOGIN,
   );
+
+  useConsoleApplicationInstance({
+    tenantId: vendor?.id,
+    vendorId: vendor?.id,
+    vendorName: vendor?.businessName,
+    branchId: activeBranch?.id,
+    terminalId: activeTerminal?.id,
+    staffId: activeStaff?.id,
+    roleId: activeStaff?.role,
+    permissions: activeStaff?.grantedMenuIds,
+  });
 
   // Restore and monitor the Firebase session.
   useEffect(() => {
