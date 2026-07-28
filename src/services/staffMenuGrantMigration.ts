@@ -172,6 +172,39 @@ export function refreshActiveStaffAfterMenuMigration(
   return migratedRecords.find(staff => staff.id === activeStaff.id) ?? activeStaff;
 }
 
+export function resolveStaffNavigationAfterMigration(
+  activeStaff: StaffMember | null,
+  migratedRecords: StaffMember[],
+  activeTab: string,
+): { activeStaff: StaffMember | null; activeTab: AppMenuId } {
+  const refreshedStaff = refreshActiveStaffAfterMenuMigration(
+    activeStaff,
+    migratedRecords,
+  );
+  const nextTab = refreshedStaff?.grantedMenuIds.includes(activeTab as AppMenuId)
+    ? activeTab as AppMenuId
+    : 'desk';
+  return { activeStaff: refreshedStaff, activeTab: nextTab };
+}
+
+export function createCanonicalSysadminFallback(
+  vendorId: string,
+  email: string,
+  createdAt = new Date().toISOString(),
+): StaffMember {
+  return {
+    id: `staff_${vendorId}_sysadmin`,
+    vendorId,
+    name: 'System Administrator (You)',
+    email: email || 'sysadmin@itred.com',
+    role: 'sysadmin',
+    grantedMenuIds: [...APPROVED_ROLE_MENU_POLICIES.sysadmin],
+    status: 'active',
+    createdAt,
+    menuGrantSchemaVersion: MENU_GRANT_SCHEMA_VERSION,
+  };
+}
+
 function invalidResult(staff: StaffMember, reason: string): StaffMenuGrantMigrationResult {
   return {
     staffId: staff?.id || 'unknown',

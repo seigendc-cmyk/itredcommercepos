@@ -52,7 +52,8 @@ import {
   saveCustomer,
   fetchCreditSales,
   fetchCreditPayments,
-  fetchCollectionActivities
+  fetchCollectionActivities,
+  migratePersistedStaffMenuGrants
 } from './services/db';
 import { auth } from './lib/firebase';
 import {
@@ -108,6 +109,29 @@ import { DeliveryFleetManagement } from './components/Delivery/DeliveryFleetMana
 import { PlanUpgradeModal } from './components/Delivery/PlanUpgradeModal';
 import { DeliveryDispatchModal } from './components/Delivery/DeliveryDispatchModal';
 import { DeliveryCourier, SubscriptionPlanType } from './types';
+import {
+  createCanonicalSysadminFallback,
+  resolveStaffNavigationAfterMigration,
+} from './services/staffMenuGrantMigration';
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(
+      () => reject(new Error('Staff menu migration timed out.')),
+      timeoutMs,
+    );
+    promise.then(
+      value => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      reason => {
+        window.clearTimeout(timeoutId);
+        reject(reason);
+      },
+    );
+  });
+}
 
 export default function App() {
   // Auth State
@@ -122,6 +146,7 @@ export default function App() {
   const [staffList, setStaffList] = useState<StaffMember[]>([]);
   const [activeStaff, setActiveStaff] = useState<StaffMember | null>(null);
   const [isStaffAuthenticated, setIsStaffAuthenticated] = useState<boolean>(false);
+  const [staffMigrationError, setStaffMigrationError] = useState('');
 
   // App Data State
   const [activeTab, setActiveTab] = useState<string>('desk');
@@ -293,27 +318,61 @@ export default function App() {
       }
 
       // Load Staff Members & set default active staff
-      const staff = await fetchStaffMembers(vendorId, email);
+      const loadedStaff = await fetchStaffMembers(vendorId, email);
+      const staff = loadedStaff.filter(member => member.vendorId === vendorId);
       setStaffList(staff);
-      const adminStaff = staff.find(s => s.role === 'sysadmin') || staff[0];
+      const adminStaff = (
+        staff.find(member => member.id === activeStaff?.id) ||
+        staff.find(member => member.role === 'sysadmin') ||
+        staff[0]
+      );
       if (adminStaff) {
         setActiveStaff(adminStaff);
-        if (adminStaff.grantedMenuIds && adminStaff.grantedMenuIds.length > 0) {
-          setActiveTab('desk');
-        }
+        setActiveTab(currentTab => (
+          adminStaff.grantedMenuIds.includes(currentTab as AppMenuId)
+            ? currentTab
+            : 'desk'
+        ));
       } else {
-        const fallbackStaff: StaffMember = {
-          id: `staff_${vendorId}_sysadmin`,
-          vendorId,
-          name: 'System Administrator (You)',
-          email: email || 'sysadmin@itred.com',
-          role: 'sysadmin',
-          grantedMenuIds: ['desk', 'pos', 'warehouse', 'transfers', 'branches', 'products', 'reports', 'approvals', 'staff', 'bi_audit'],
-          status: 'active',
-          createdAt: new Date().toISOString()
-        };
+        const fallbackStaff = createCanonicalSysadminFallback(vendorId, email);
         setActiveStaff(fallbackStaff);
         setStaffList([fallbackStaff]);
+      }
+
+      if (staff.length > 0) {
+        setStaffMigrationError('');
+        void withTimeout(
+          migratePersistedStaffMenuGrants(vendorId, staff),
+          5000,
+        ).then(report => {
+          const migratedStaff = report.records.filter(member => member.vendorId === vendorId);
+          const failedCount = report.results.filter(result => result.status === 'failed').length;
+          setStaffList(migratedStaff);
+          setActiveStaff(currentStaff => {
+            const navigation = resolveStaffNavigationAfterMigration(
+              currentStaff,
+              migratedStaff,
+              activeTab,
+            );
+            setActiveTab(currentTab => (
+              resolveStaffNavigationAfterMigration(
+                currentStaff,
+                migratedStaff,
+                currentTab,
+              ).activeTab
+            ));
+            return navigation.activeStaff;
+          });
+          if (failedCount > 0) {
+            setStaffMigrationError(
+              `${failedCount} staff permission record${failedCount === 1 ? '' : 's'} could not be updated. Existing permissions were preserved.`,
+            );
+          }
+        }).catch(() => {
+          setStaffMigrationError(
+            'Staff permissions could not be refreshed. Existing permissions were preserved.',
+          );
+        });
       }
 
       // Load logs, approvals, and BI events
@@ -338,16 +397,7 @@ export default function App() {
     } catch (e) {
       console.warn('Error loading app data, enforcing safety fallback staff:', e);
       if (!activeStaff) {
-        const fallbackStaff: StaffMember = {
-          id: `staff_${vendorId}_sysadmin`,
-          vendorId,
-          name: 'System Administrator (You)',
-          email: email || 'sysadmin@itred.com',
-          role: 'sysadmin',
-          grantedMenuIds: ['desk', 'pos', 'warehouse', 'transfers', 'branches', 'products', 'reports', 'approvals', 'staff', 'bi_audit'],
-          status: 'active',
-          createdAt: new Date().toISOString()
-        };
+        const fallbackStaff = createCanonicalSysadminFallback(vendorId, email);
         setActiveStaff(fallbackStaff);
         setStaffList([fallbackStaff]);
       }
@@ -1004,6 +1054,7 @@ export default function App() {
             staffList={staffList}
             branches={branches}
             activeStaff={activeStaff}
+            migrationError={staffMigrationError}
             onSwitchStaff={handleSwitchStaff}
             onSaveStaff={handleSaveStaff}
           />
