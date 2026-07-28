@@ -1,0 +1,2 @@
+﻿"Component","File","Status","Classification","RequiredAction","TargetRouteOrWorkspace","RequiredPermission","RequiredService"
+"Navbar","D:\ICP\itred-commerce-pos\src\components\Navbar.tsx","IMPORTED_NOT_RENDERED","LEGACY","Remove unused import; Sidebar is active navigation shell","None","None","None"

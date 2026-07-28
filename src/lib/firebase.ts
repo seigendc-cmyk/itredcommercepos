@@ -6,13 +6,17 @@ import {
 import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
+const runtimeEnvironment = import.meta.env ?? (
+  typeof process !== "undefined" ? process.env : {}
+);
+
 const requiredEnvironmentVariables = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  apiKey: runtimeEnvironment.VITE_FIREBASE_API_KEY,
+  authDomain: runtimeEnvironment.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: runtimeEnvironment.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: runtimeEnvironment.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: runtimeEnvironment.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: runtimeEnvironment.VITE_FIREBASE_APP_ID,
 };
 
 const missingEnvironmentVariables = Object.entries(
@@ -50,7 +54,7 @@ googleProvider.setCustomParameters({
 });
 
 export const databaseId =
-  import.meta.env.VITE_DATABASE_ID ||
+  runtimeEnvironment.VITE_DATABASE_ID ||
   "ai-studio-6dd086fa-b537-4e03-b916-32eee1121008";
 
 export const db = getFirestore(app, databaseId);

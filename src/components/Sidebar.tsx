@@ -66,6 +66,7 @@ const MENU_GROUPS: MenuCategoryGroup[] = [
     items: [
       { id: 'desk', label: 'Staff Desk', icon: <LayoutDashboard className="w-4 h-4" /> },
       { id: 'pos', label: 'POS Register', icon: <ShoppingCart className="w-4 h-4" /> },
+      { id: 'customers', label: 'Customers & CRM', icon: <UserCheck className="w-4 h-4" /> },
       { id: 'delivery', label: 'Delivery Services', icon: <Truck className="w-4 h-4" /> },
     ]
   },
@@ -99,6 +100,12 @@ const MENU_GROUPS: MenuCategoryGroup[] = [
     ]
   }
 ];
+
+export function getVisibleSidebarMenuIds(grantedMenuIds: AppMenuId[]): AppMenuId[] {
+  return MENU_GROUPS.flatMap(group => group.items)
+    .filter(item => grantedMenuIds.includes(item.id))
+    .map(item => item.id);
+}
 
 export const Sidebar: React.FC<SidebarProps> = ({
   vendor,
