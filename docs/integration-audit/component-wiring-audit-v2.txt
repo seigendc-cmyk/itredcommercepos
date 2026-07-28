@@ -1,0 +1,49 @@
+﻿
+Component                    File                                                                              Status                TotalReferenceFiles ImportReferenceFiles RenderReferenceFiles LazyReferen
+                                                                                                                                                                                                       ceFiles
+---------                    ----                                                                              ------                ------------------- -------------------- -------------------- -----------
+Navbar                       D:\ICP\itred-commerce-pos\src\components\Navbar.tsx                               IMPORTED_NOT_RENDERED                   1                    1                    0           0
+AddBranchTerminalModal       D:\ICP\itred-commerce-pos\src\components\Branch\AddBranchTerminalModal.tsx        RENDERED                                1                    1                    1           0
+AddWarehouseModal            D:\ICP\itred-commerce-pos\src\components\Warehouse\AddWarehouseModal.tsx          RENDERED                                1                    1                    1           0
+ApprovalsWorkspace           D:\ICP\itred-commerce-pos\src\components\Approvals\ApprovalsWorkspace.tsx         RENDERED                                1                    1                    1           0
+AuthView                     D:\ICP\itred-commerce-pos\src\components\AuthView.tsx                             RENDERED                                1                    1                    1           0
+BIAuditDashboard             D:\ICP\itred-commerce-pos\src\components\BI\BIAuditDashboard.tsx                  RENDERED                                1                    1                    1           0
+BILossPreventionModal        D:\ICP\itred-commerce-pos\src\components\Inventory\BILossPreventionModal.tsx      RENDERED                                1                    1                    1           0
+BranchManagement             D:\ICP\itred-commerce-pos\src\components\Branch\BranchManagement.tsx              RENDERED                                1                    1                    1           0
+CloseShiftModal              D:\ICP\itred-commerce-pos\src\components\POS\CloseShiftModal.tsx                  RENDERED                                1                    1                    1           0
+ConsolePlanModal             D:\ICP\itred-commerce-pos\src\components\Billing\ConsolePlanModal.tsx             RENDERED                                1                    1                    1           0
+DeliveryDispatchModal        D:\ICP\itred-commerce-pos\src\components\Delivery\DeliveryDispatchModal.tsx       RENDERED                                1                    1                    1           0
+DeliveryFleetManagement      D:\ICP\itred-commerce-pos\src\components\Delivery\DeliveryFleetManagement.tsx     RENDERED                                1                    1                    1           0
+EODReportModal               D:\ICP\itred-commerce-pos\src\components\POS\EODReportModal.tsx                   RENDERED                                1                    1                    1           0
+Financial                    D:\ICP\itred-commerce-pos\src\components\Financial\Financial.tsx                  RENDERED                               12                    1                    1           0
+InvoiceModal                 D:\ICP\itred-commerce-pos\src\components\Billing\InvoiceModal.tsx                 RENDERED                                1                    1                    1           0
+Modal                        D:\ICP\itred-commerce-pos\src\components\Common\Modal.tsx                         RENDERED                               25                   16                   16           0
+OfflineOperationalStateBadge D:\ICP\itred-commerce-pos\src\components\Offline\OfflineOperationalStateBadge.tsx RENDERED                                1                    1                    1           0
+OnboardingModal              D:\ICP\itred-commerce-pos\src\components\OnboardingModal.tsx                      RENDERED                                1                    1                    1           0
+OpenShiftModal               D:\ICP\itred-commerce-pos\src\components\POS\OpenShiftModal.tsx                   RENDERED                                1                    1                    1           0
+PaymentModal                 D:\ICP\itred-commerce-pos\src\components\POS\PaymentModal.tsx                     RENDERED                                1                    1                    1           0
+PlanUpgradeModal             D:\ICP\itred-commerce-pos\src\components\Delivery\PlanUpgradeModal.tsx            RENDERED                                1                    1                    1           0
+POSTerminal                  D:\ICP\itred-commerce-pos\src\components\POS\POSTerminal.tsx                      RENDERED                                1                    1                    1           0
+ProductImportModal           D:\ICP\itred-commerce-pos\src\components\Products\ProductImportModal.tsx          RENDERED                                1                    1                    1           0
+ProductLedgerModal           D:\ICP\itred-commerce-pos\src\components\Warehouse\ProductLedgerModal.tsx         RENDERED                                2                    2                    2           0
+ProductManagement            D:\ICP\itred-commerce-pos\src\components\Products\ProductManagement.tsx           RENDERED                                1                    1                    1           0
+ProductModal                 D:\ICP\itred-commerce-pos\src\components\Products\ProductModal.tsx                RENDERED                                1                    1                    1           0
+ReceiptModal                 D:\ICP\itred-commerce-pos\src\components\POS\ReceiptModal.tsx                     RENDERED                                1                    1                    1           0
+ReceiveSupplierStockModal    D:\ICP\itred-commerce-pos\src\components\Warehouse\ReceiveSupplierStockModal.tsx  RENDERED                                1                    1                    1           0
+ReportsDashboard             D:\ICP\itred-commerce-pos\src\components\Reports\ReportsDashboard.tsx             RENDERED                                1                    1                    1           0
+ServiceOrderModal            D:\ICP\itred-commerce-pos\src\components\Billing\ServiceOrderModal.tsx            RENDERED                                1                    1                    1           0
+SettingsWorkspace            D:\ICP\itred-commerce-pos\src\components\Settings\SettingsWorkspace.tsx           RENDERED                                1                    1                    1           0
+Sidebar                      D:\ICP\itred-commerce-pos\src\components\Sidebar.tsx                              RENDERED                                2                    1                    1           0
+StaffAccessForm              D:\ICP\itred-commerce-pos\src\components\Auth\StaffAccessForm.tsx                 RENDERED                                1                    1                    1           0
+StaffDesk                    D:\ICP\itred-commerce-pos\src\components\Staff\StaffDesk.tsx                      RENDERED                                1                    1                    1           0
+StaffManagement              D:\ICP\itred-commerce-pos\src\components\Staff\StaffManagement.tsx                RENDERED                                1                    1                    1           0
+StockAdjustmentModal         D:\ICP\itred-commerce-pos\src\components\Branch\StockAdjustmentModal.tsx          RENDERED                                1                    1                    1           0
+StocktakeWorkspace           D:\ICP\itred-commerce-pos\src\components\Inventory\StocktakeWorkspace.tsx         RENDERED                                1                    1                    1           0
+TransferReceiptModal         D:\ICP\itred-commerce-pos\src\components\Warehouse\TransferReceiptModal.tsx       RENDERED                                1                    1                    1           0
+TransferSlipModal            D:\ICP\itred-commerce-pos\src\components\Warehouse\TransferSlipModal.tsx          RENDERED                                1                    1                    1           0
+TransferStockModal           D:\ICP\itred-commerce-pos\src\components\Warehouse\TransferStockModal.tsx         RENDERED                                1                    1                    1           0
+VendorBillingWorkspace       D:\ICP\itred-commerce-pos\src\components\Billing\VendorBillingWorkspace.tsx       RENDERED                                1                    1                    1           0
+WarehouseManagement          D:\ICP\itred-commerce-pos\src\components\Warehouse\WarehouseManagement.tsx        RENDERED                                1                    1                    1           0
+
+
+

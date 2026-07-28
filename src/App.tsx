@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { onAuthStateChanged, signOut as firebaseSignOut } from 'firebase/auth';
 import { 
   VendorProfile, 
@@ -14,7 +14,11 @@ import {
   StaffMember,
   ApprovalRequest,
   AppMenuId,
-  TerminalShift
+  TerminalShift,
+  Customer,
+  CreditSale,
+  CreditPayment,
+  CollectionActivity
 } from './types';
 import {
   fetchVendorProfile,
@@ -43,7 +47,13 @@ import {
   openTerminalShift,
   recordOrderToShift,
   closeTerminalShift,
-  fetchShiftHistory
+  fetchShiftHistory,
+  fetchCustomers,
+  saveCustomer,
+  fetchCreditSales,
+  fetchCreditPayments,
+  fetchCollectionActivities,
+  migratePersistedStaffMenuGrants
 } from './services/db';
 import { auth } from './lib/firebase';
 import {
@@ -61,12 +71,12 @@ import { TransferSlipAction, TransferSlipFormat } from './services/transferSlip'
 // UI Components
 import { AuthView } from './components/AuthView';
 import { OnboardingModal } from './components/OnboardingModal';
-import { Navbar } from './components/Navbar';
 import { POSTerminal } from './components/POS/POSTerminal';
 import { WarehouseManagement } from './components/Warehouse/WarehouseManagement';
 import { BranchManagement } from './components/Branch/BranchManagement';
 import { ProductManagement } from './components/Products/ProductManagement';
 import { ReportsDashboard } from './components/Reports/ReportsDashboard';
+import { CustomerManagement, CustomerSaveInput } from './components/Customers/CustomerManagement';
 
 // New Architecture Components
 import { StaffDesk } from './components/Staff/StaffDesk';
@@ -100,6 +110,29 @@ import { DeliveryFleetManagement } from './components/Delivery/DeliveryFleetMana
 import { PlanUpgradeModal } from './components/Delivery/PlanUpgradeModal';
 import { DeliveryDispatchModal } from './components/Delivery/DeliveryDispatchModal';
 import { DeliveryCourier, SubscriptionPlanType } from './types';
+import {
+  createCanonicalSysadminFallback,
+  resolveStaffNavigationAfterMigration,
+} from './services/staffMenuGrantMigration';
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(
+      () => reject(new Error('Staff menu migration timed out.')),
+      timeoutMs,
+    );
+    promise.then(
+      value => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      reason => {
+        window.clearTimeout(timeoutId);
+        reject(reason);
+      },
+    );
+  });
+}
 
 export default function App() {
   // Auth State
@@ -114,6 +147,7 @@ export default function App() {
   const [staffList, setStaffList] = useState<StaffMember[]>([]);
   const [activeStaff, setActiveStaff] = useState<StaffMember | null>(null);
   const [isStaffAuthenticated, setIsStaffAuthenticated] = useState<boolean>(false);
+  const [staffMigrationError, setStaffMigrationError] = useState('');
 
   // App Data State
   const [activeTab, setActiveTab] = useState<string>('desk');
@@ -123,6 +157,12 @@ export default function App() {
   const [products, setProducts] = useState<Product[]>([]);
   const [warehouseStock, setWarehouseStock] = useState<Record<string, number>>({});
   const [branchStock, setBranchStock] = useState<Record<string, number>>({});
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [creditSales, setCreditSales] = useState<CreditSale[]>([]);
+  const [creditPayments, setCreditPayments] = useState<CreditPayment[]>([]);
+  const [collectionActivities, setCollectionActivities] = useState<CollectionActivity[]>([]);
+  const [customerLoading, setCustomerLoading] = useState(false);
+  const [customerError, setCustomerError] = useState<string | null>(null);
 
   const [activeBranch, setActiveBranch] = useState<Branch | null>(null);
   const [activeTerminal, setActiveTerminal] = useState<Terminal | null>(null);
@@ -254,6 +294,8 @@ export default function App() {
       const terms = await fetchTerminals(vendorId);
       const prods = await fetchProducts(vendorId);
 
+      await loadCustomerData(vendorId);
+
       setWarehouses(whs);
       setBranches(brs);
       setTerminals(terms);
@@ -277,27 +319,61 @@ export default function App() {
       }
 
       // Load Staff Members & set default active staff
-      const staff = await fetchStaffMembers(vendorId, email);
+      const loadedStaff = await fetchStaffMembers(vendorId, email);
+      const staff = loadedStaff.filter(member => member.vendorId === vendorId);
       setStaffList(staff);
-      const adminStaff = staff.find(s => s.role === 'sysadmin') || staff[0];
+      const adminStaff = (
+        staff.find(member => member.id === activeStaff?.id) ||
+        staff.find(member => member.role === 'sysadmin') ||
+        staff[0]
+      );
       if (adminStaff) {
         setActiveStaff(adminStaff);
-        if (adminStaff.grantedMenuIds && adminStaff.grantedMenuIds.length > 0) {
-          setActiveTab('desk');
-        }
+        setActiveTab(currentTab => (
+          adminStaff.grantedMenuIds.includes(currentTab as AppMenuId)
+            ? currentTab
+            : 'desk'
+        ));
       } else {
-        const fallbackStaff: StaffMember = {
-          id: `staff_${vendorId}_sysadmin`,
-          vendorId,
-          name: 'System Administrator (You)',
-          email: email || 'sysadmin@itred.com',
-          role: 'sysadmin',
-          grantedMenuIds: ['desk', 'pos', 'warehouse', 'transfers', 'branches', 'products', 'reports', 'approvals', 'staff', 'bi_audit'],
-          status: 'active',
-          createdAt: new Date().toISOString()
-        };
+        const fallbackStaff = createCanonicalSysadminFallback(vendorId, email);
         setActiveStaff(fallbackStaff);
         setStaffList([fallbackStaff]);
+      }
+
+      if (staff.length > 0) {
+        setStaffMigrationError('');
+        void withTimeout(
+          migratePersistedStaffMenuGrants(vendorId, staff),
+          5000,
+        ).then(report => {
+          const migratedStaff = report.records.filter(member => member.vendorId === vendorId);
+          const failedCount = report.results.filter(result => result.status === 'failed').length;
+          setStaffList(migratedStaff);
+          setActiveStaff(currentStaff => {
+            const navigation = resolveStaffNavigationAfterMigration(
+              currentStaff,
+              migratedStaff,
+              activeTab,
+            );
+            setActiveTab(currentTab => (
+              resolveStaffNavigationAfterMigration(
+                currentStaff,
+                migratedStaff,
+                currentTab,
+              ).activeTab
+            ));
+            return navigation.activeStaff;
+          });
+          if (failedCount > 0) {
+            setStaffMigrationError(
+              `${failedCount} staff permission record${failedCount === 1 ? '' : 's'} could not be updated. Existing permissions were preserved.`,
+            );
+          }
+        }).catch(() => {
+          setStaffMigrationError(
+            'Staff permissions could not be refreshed. Existing permissions were preserved.',
+          );
+        });
       }
 
       // Load logs, approvals, and BI events
@@ -322,16 +398,7 @@ export default function App() {
     } catch (e) {
       console.warn('Error loading app data, enforcing safety fallback staff:', e);
       if (!activeStaff) {
-        const fallbackStaff: StaffMember = {
-          id: `staff_${vendorId}_sysadmin`,
-          vendorId,
-          name: 'System Administrator (You)',
-          email: email || 'sysadmin@itred.com',
-          role: 'sysadmin',
-          grantedMenuIds: ['desk', 'pos', 'warehouse', 'transfers', 'branches', 'products', 'reports', 'approvals', 'staff', 'bi_audit'],
-          status: 'active',
-          createdAt: new Date().toISOString()
-        };
+        const fallbackStaff = createCanonicalSysadminFallback(vendorId, email);
         setActiveStaff(fallbackStaff);
         setStaffList([fallbackStaff]);
       }
@@ -378,6 +445,40 @@ export default function App() {
     if (!vendor) return;
     await saveStaffMember(vendor.id, staffData);
     await refreshAllData();
+  };
+
+  const loadCustomerData = async (vendorId: string) => {
+    setCustomerLoading(true);
+    setCustomerError(null);
+    try {
+      const [
+        loadedCustomers,
+        loadedCreditSales,
+        loadedCreditPayments,
+        loadedActivities,
+      ] = await Promise.all([
+        fetchCustomers(vendorId),
+        fetchCreditSales(vendorId),
+        fetchCreditPayments(vendorId),
+        fetchCollectionActivities(vendorId),
+      ]);
+      setCustomers(loadedCustomers.filter(item => item.vendorId === vendorId));
+      setCreditSales(loadedCreditSales.filter(item => item.vendorId === vendorId));
+      setCreditPayments(loadedCreditPayments.filter(item => item.vendorId === vendorId));
+      setCollectionActivities(loadedActivities.filter(item => item.vendorId === vendorId));
+    } catch (reason) {
+      setCustomerError(
+        reason instanceof Error ? reason.message : 'Unable to load customer data.',
+      );
+    } finally {
+      setCustomerLoading(false);
+    }
+  };
+
+  const handleSaveCustomer = async (customerData: CustomerSaveInput) => {
+    if (!vendor) return;
+    await saveCustomer(vendor.id, customerData);
+    await loadCustomerData(vendor.id);
   };
 
   // Review Approval Request
@@ -542,7 +643,7 @@ export default function App() {
         });
 
         alert(
-          `🚨 LIVE DISPATCH ALERT TO TERMINAL:\n` +
+          `ðŸš¨ LIVE DISPATCH ALERT TO TERMINAL:\n` +
           `Message broadcasted to courier ${deliveryDetails.courierName} (${deliveryDetails.vehicleType.toUpperCase()} - ${deliveryDetails.vehiclePlate})!\n` +
           `"Attention ${deliveryDetails.courierName}: Order #${newOrder.orderNumber} is ready for collection at ${activeBranch.name} counter for ${paymentDetails.customerName || 'Customer'} (${deliveryDetails.deliveryAddress}). Fee: $${deliveryDetails.deliveryFee.toFixed(2)}."`
         );
@@ -792,6 +893,20 @@ export default function App() {
           />
         )}
 
+        {activeTab === 'customers' && activeStaff.grantedMenuIds.includes('customers') && (
+          <CustomerManagement
+            vendorId={vendor.id}
+            customers={customers}
+            creditSales={creditSales}
+            creditPayments={creditPayments}
+            collectionActivities={collectionActivities}
+            loading={customerLoading}
+            error={customerError}
+            onSaveCustomer={handleSaveCustomer}
+            onRefresh={() => loadCustomerData(vendor.id)}
+          />
+        )}
+
         {/* POS Register */}
         {activeTab === 'pos' && (!activeStaff.grantedMenuIds || activeStaff.grantedMenuIds.length === 0 || activeStaff.grantedMenuIds.includes('pos')) && (
           <POSTerminal
@@ -902,7 +1017,7 @@ export default function App() {
         )}
 
         {/* Financial & Check Writer Workspace */}
-        {activeTab === 'financial' && (
+        {activeTab === 'financial' && activeStaff.grantedMenuIds.includes('financial') && (
           <Financial
             vendor={vendor}
             activeStaff={activeStaff}
@@ -926,6 +1041,7 @@ export default function App() {
             staffList={staffList}
             branches={branches}
             activeStaff={activeStaff}
+            migrationError={staffMigrationError}
             onSwitchStaff={handleSwitchStaff}
             onSaveStaff={handleSaveStaff}
           />
@@ -947,7 +1063,7 @@ export default function App() {
         )}
 
         {/* Delivery Services Workspace */}
-        {activeTab === 'delivery' && (
+        {activeTab === 'delivery' && activeStaff.grantedMenuIds.includes('delivery') && (
           <DeliveryFleetManagement
             vendor={vendor}
             branches={branches}
