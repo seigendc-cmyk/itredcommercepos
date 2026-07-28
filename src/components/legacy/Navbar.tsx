@@ -19,7 +19,7 @@ import {
   CreditCard,
   Landmark
 } from 'lucide-react';
-import { VendorProfile, Branch, Terminal, Warehouse, StaffMember, AppMenuId } from '../types';
+import { VendorProfile, Branch, Terminal, Warehouse, StaffMember, AppMenuId } from '../../types';
 
 interface NavbarProps {
   vendor: VendorProfile;
