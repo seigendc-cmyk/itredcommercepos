@@ -1,4 +1,3 @@
-import ExcelJS from 'exceljs';
 import {
   CANONICAL_PRODUCT_HEADERS,
   CanonicalProductImportRow,
@@ -106,6 +105,7 @@ export async function parseProductImportFile(file: File, validLocationCodes: str
   const rejection = validateImportFile(file);
   if (rejection) throw new Error(rejection);
   if (file.name.toLowerCase().endsWith('.csv')) return parseCanonicalMatrix(parseCsv(await file.text()), file.name, validLocationCodes);
+  const { default: ExcelJS } = await import('exceljs');
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(await file.arrayBuffer() as any);
   const products = workbook.getWorksheet('Products');

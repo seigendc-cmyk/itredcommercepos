@@ -1,4 +1,4 @@
-import ExcelJS from 'exceljs';
+import type ExcelJS from 'exceljs';
 import { CANONICAL_PRODUCT_HEADERS, PRODUCT_IMPORT_SCHEMA_VERSION, PRODUCT_IMPORT_TEMPLATE_NAME, PRODUCT_IMPORT_TEMPLATE_VERSION, ProductImportLocation } from './domain';
 
 export interface ProductTemplateOptions { tenantId?: string; applicationVersion?: string; categories: string[]; locations: ProductImportLocation[]; }
@@ -12,8 +12,9 @@ export function exportProductCsvTemplate(): void {
   download(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' }), 'itred-product-import-template.csv');
 }
 
-export function createProductTemplateWorkbook(options: ProductTemplateOptions): ExcelJS.Workbook {
-  const workbook = new ExcelJS.Workbook();
+export async function createProductTemplateWorkbook(options: ProductTemplateOptions): Promise<ExcelJS.Workbook> {
+  const { default: ExcelJSRuntime } = await import('exceljs');
+  const workbook = new ExcelJSRuntime.Workbook();
   workbook.creator = 'iTred Commerce POS'; workbook.created = new Date();
   const products = workbook.addWorksheet('Products', { views: [{ state: 'frozen', ySplit: 1 }] });
   products.addRow([...CANONICAL_PRODUCT_HEADERS]); products.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } }; products.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F242D' } };
@@ -35,6 +36,6 @@ export function createProductTemplateWorkbook(options: ProductTemplateOptions): 
 }
 
 export async function exportProductXlsxTemplate(options: ProductTemplateOptions): Promise<void> {
-  const data = await createProductTemplateWorkbook(options).xlsx.writeBuffer();
+  const data = await (await createProductTemplateWorkbook(options)).xlsx.writeBuffer();
   download(new Blob([data as BlobPart], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'itred-product-import-template.xlsx');
 }

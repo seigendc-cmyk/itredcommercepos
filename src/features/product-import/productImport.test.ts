@@ -15,7 +15,7 @@ test('canonical CSV is accepted and quoted commas map only to Description', () =
 });
 
 test('canonical XLSX is accepted with authoritative metadata', async () => {
-  const workbook = createProductTemplateWorkbook({ categories: [], locations: [] });
+  const workbook = await createProductTemplateWorkbook({ categories: [], locations: [] });
   workbook.getWorksheet('Products')!.addRow(valid);
   const bytes = await workbook.xlsx.writeBuffer();
   const batch = await parseProductImportFile(new File([bytes], 'products.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), []);

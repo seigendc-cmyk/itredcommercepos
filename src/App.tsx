@@ -112,6 +112,7 @@ import { PlanUpgradeModal } from './components/Delivery/PlanUpgradeModal';
 import { DeliveryDispatchModal } from './components/Delivery/DeliveryDispatchModal';
 import { DeliveryCourier, SubscriptionPlanType } from './types';
 import { buildOpeningBalanceRequest, CanonicalProductImportRow, ProductImportBatch, toProductMaster } from './features/product-import';
+import { assertStocktakePermission } from './features/stocktake';
 
 export default function App() {
   // Auth State
@@ -457,6 +458,7 @@ export default function App() {
   const handleSubmitStocktakeApproval = async (payload: {
     title: string;
     description: string;
+    idempotencyKey: string;
     dataPayload: {
       locationType: 'warehouse' | 'branch';
       locationId: string;
@@ -472,9 +474,11 @@ export default function App() {
     };
   }) => {
     if (!vendor || !activeStaff) return;
+    assertStocktakePermission(activeStaff.role, 'stocktake.submit');
     await createApprovalRequest(vendor.id, {
       entityType: 'STOCKTAKE_ADJUSTMENT',
-      entityId: `adj_${crypto.randomUUID()}`,
+      entityId: `stocktake_${payload.idempotencyKey.replace(/[^a-z0-9_-]+/gi, '_')}`,
+      idempotencyKey: payload.idempotencyKey,
       title: payload.title,
       description: payload.description,
       requester: { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role },
@@ -958,6 +962,8 @@ export default function App() {
             branches={branches}
             activeStaff={activeStaff}
             vendorId={vendor.id}
+            businessName={vendor.businessName}
+            approvalRequests={approvalRequests}
             onOpenAddProductModal={() => {
               setProductToEdit(null);
               setIsProductModalOpen(true);
@@ -983,6 +989,7 @@ export default function App() {
             onTemplateExport={format => logBIEvent(vendor.id, 'PRODUCT_IMPORT_TEMPLATE_EXPORTED', `Product import ${format} template exported`, { outcome: 'completed', format }, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role })}
             onSubmitStocktakeApproval={handleSubmitStocktakeApproval}
             onNavigateToApprovals={() => setActiveTab('approvals')}
+            onLogBIEvent={(eventType, details) => logBIEvent(vendor.id, eventType, eventType.replaceAll('_', ' ').toLowerCase(), details, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role })}
           />
         )}
 

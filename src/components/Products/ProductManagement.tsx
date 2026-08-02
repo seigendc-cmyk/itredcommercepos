@@ -1,20 +1,23 @@
 import React, { useMemo, useState } from 'react';
 import { Archive, ClipboardCheck, Download, Edit3, FileSpreadsheet, Package, Plus, RotateCcw, Search } from 'lucide-react';
-import { Branch, Product, StaffMember, Warehouse } from '../../types';
+import { ApprovalRequest, Branch, Product, StaffMember, Warehouse } from '../../types';
 import { exportProductCsvTemplate, exportProductXlsxTemplate, ProductImportLocation } from '../../features/product-import';
 import { StocktakeWorkspace } from '../Inventory/StocktakeWorkspace';
+import { BIEventType } from '../../bi/types';
 
 interface Props {
   products: Product[]; warehouseStock: Record<string, number>; branchStock: Record<string, number>;
-  warehouses?: Warehouse[]; branches?: Branch[]; activeStaff?: StaffMember; vendorId?: string;
+  warehouses?: Warehouse[]; branches?: Branch[]; activeStaff?: StaffMember; vendorId?: string; businessName?: string;
+  approvalRequests?: ApprovalRequest[];
   onOpenAddProductModal: () => void; onOpenImportModal?: () => void; onEditProduct: (product: Product) => void;
   onSubmitStocktakeApproval?: (payload: any) => Promise<void>; onNavigateToApprovals?: () => void;
   onStockLocationChange?: (type: 'warehouse' | 'branch', id: string) => Promise<void>;
   onArchiveProduct?: (product: Product) => Promise<void>; onRestoreProduct?: (product: Product) => Promise<void>;
   onTemplateExport?: (format: 'CSV' | 'XLSX') => void;
+  onLogBIEvent?: (eventType: BIEventType, details: Record<string, unknown>) => Promise<unknown> | void;
 }
 
-export const ProductManagement: React.FC<Props> = ({ products, warehouseStock, branchStock, warehouses = [], branches = [], activeStaff, vendorId = '', onOpenAddProductModal, onOpenImportModal, onEditProduct, onSubmitStocktakeApproval, onNavigateToApprovals, onStockLocationChange, onArchiveProduct, onRestoreProduct, onTemplateExport }) => {
+export const ProductManagement: React.FC<Props> = ({ products, warehouseStock, branchStock, warehouses = [], branches = [], activeStaff, vendorId = '', businessName = 'iTred Commerce POS', approvalRequests = [], onOpenAddProductModal, onOpenImportModal, onEditProduct, onSubmitStocktakeApproval, onNavigateToApprovals, onStockLocationChange, onArchiveProduct, onRestoreProduct, onTemplateExport, onLogBIEvent }) => {
   const [subTab, setSubTab] = useState<'catalog' | 'stocktake'>('catalog');
   const [search, setSearch] = useState(''); const [showArchived, setShowArchived] = useState(false);
   const firstLocation = warehouses[0] ? `warehouse:${warehouses[0].id}` : branches[0] ? `branch:${branches[0].id}` : '';
@@ -26,7 +29,7 @@ export const ProductManagement: React.FC<Props> = ({ products, warehouseStock, b
   const locations: ProductImportLocation[] = [...warehouses.map(item => ({ id: item.id, code: item.code, name: item.name, type: 'warehouse' as const })), ...branches.map(item => ({ id: item.id, code: item.code, name: item.name, type: 'branch' as const }))];
   const rows = useMemo(() => products.filter(product => (showArchived || product.status !== 'archived') && [product.sku, product.name, product.barcode, product.alternativeLookupCode].some(value => value?.toLowerCase().includes(search.toLowerCase()))), [products, search, showArchived]);
   const exportOptions = { tenantId: vendorId, applicationVersion: import.meta.env?.VITE_APP_VERSION, categories: Array.from(new Set<string>(products.map(product => product.category))), locations };
-  if (subTab === 'stocktake' && activeStaff && onSubmitStocktakeApproval) return <div className="space-y-4"><button onClick={() => setSubTab('catalog')} className="font-bold text-[#FF6600]">← Product Catalog</button><StocktakeWorkspace products={products} warehouses={warehouses} branches={branches} warehouseStock={warehouseStock} branchStock={branchStock} activeStaff={activeStaff} vendorId={vendorId} onSubmitStocktakeApproval={onSubmitStocktakeApproval} onNavigateToApprovals={onNavigateToApprovals} onStockLocationChange={onStockLocationChange} /></div>;
+  if (subTab === 'stocktake' && activeStaff && onSubmitStocktakeApproval) return <div className="space-y-4"><button onClick={() => setSubTab('catalog')} className="font-bold text-[#FF6600]">← Product Catalog</button><StocktakeWorkspace products={products} warehouses={warehouses} branches={branches} warehouseStock={warehouseStock} branchStock={branchStock} activeStaff={activeStaff} vendorId={vendorId} businessName={businessName} approvalRequests={approvalRequests} onSubmitStocktakeApproval={onSubmitStocktakeApproval} onNavigateToApprovals={onNavigateToApprovals} onStockLocationChange={onStockLocationChange} onLogBIEvent={onLogBIEvent} /></div>;
   const changeLocation = async (value: string) => { setLocation(value); const [type, id] = value.split(':') as ['warehouse' | 'branch', string]; await onStockLocationChange?.(type, id); };
   return <div className="space-y-5">
     <section className="bg-white border border-slate-300 p-5 flex flex-col lg:flex-row justify-between gap-4">

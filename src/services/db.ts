@@ -81,6 +81,7 @@ import {
   DEFAULT_INVENTORY_APPROVAL_POLICY,
   INVENTORY_WORKFLOW_POLICIES,
   InventoryWorkflowError,
+  createIdempotentApprovalRequestId,
   isSupplierReceiptAutoApproved,
   markInventoryRequestCompleted,
   markInventoryRequestProcessing,
@@ -1840,6 +1841,7 @@ function approvalTypeForEntity(entityType: CriticalInventoryEntityType): Approva
 export interface InventoryApprovalSubmission {
   entityType: CriticalInventoryEntityType;
   entityId: string;
+  idempotencyKey?: string;
   title: string;
   description: string;
   requester: WorkflowActor;
@@ -1995,7 +1997,10 @@ export async function createApprovalRequest(
 ): Promise<ApprovalRequest> {
   const now = new Date().toISOString();
   const policy = await fetchInventoryApprovalPolicy(vendorId);
-  const id = `appr_${crypto.randomUUID()}`;
+  const idempotencyKey = submission.idempotencyKey?.trim();
+  const id = idempotencyKey
+    ? createIdempotentApprovalRequestId(vendorId, idempotencyKey)
+    : `appr_${crypto.randomUUID()}`;
   const request = createPendingInventoryRequest({
     id,
     tenantId: vendorId,
@@ -2018,7 +2023,17 @@ export async function createApprovalRequest(
     notificationAudienceRoles: INVENTORY_WORKFLOW_POLICIES[submission.entityType].approveRoles,
   }, now);
 
-  await runTransaction(db, async transaction => {
+  const persisted = await runTransaction(db, async transaction => {
+    if (idempotencyKey) {
+      const existingSnapshot = await transaction.get(doc(db, 'vendors', vendorId, 'approval_requests', id));
+      if (existingSnapshot.exists()) {
+        const existing = normalizeStoredApproval(vendorId, existingSnapshot.id, existingSnapshot.data());
+        if (existing.entityType !== submission.entityType || existing.entityId !== submission.entityId) {
+          throw new Error('The approval idempotency key is already assigned to a different request.');
+        }
+        return { request: existing, created: false };
+      }
+    }
     transaction.set(doc(db, 'vendors', vendorId, 'approval_requests', id), request);
     for (const [index, status] of (['DRAFT', 'SUBMITTED', 'PENDING_APPROVAL'] as InventoryWorkflowStatus[]).entries()) {
       const event = auditEventDocument(
@@ -2030,7 +2045,10 @@ export async function createApprovalRequest(
       );
       transaction.set(doc(db, 'vendors', vendorId, 'approval_events', event.id), event);
     }
+    return { request, created: true };
   });
+
+  if (!persisted.created) return persisted.request;
 
   await logWorkflowTransitions(
     request,
@@ -2038,7 +2056,7 @@ export async function createApprovalRequest(
     submission.requester,
     'Inventory transaction submitted for approval.',
   );
-  return request;
+  return persisted.request;
 }
 
 function requirePayloadItems(payload: ApprovalDataPayload) {

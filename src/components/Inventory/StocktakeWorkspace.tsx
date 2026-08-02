@@ -1,27 +1,47 @@
-import React, { useState, useMemo } from 'react';
-import { Product, Warehouse, Branch, StaffMember, ApprovalRequest } from '../../types';
-import { BILossPreventionModal } from './BILossPreventionModal';
-import { buildProductLocationStockView } from '../../features/inventory/productLocationStockView';
-import { 
-  Boxes, 
-  Calendar, 
-  Layers, 
-  Search, 
-  Plus, 
-  Minus, 
-  RotateCcw, 
-  CheckCircle2, 
-  AlertTriangle, 
-  Send, 
-  ShieldAlert, 
-  Zap, 
-  Filter, 
-  Building, 
-  Warehouse as WarehouseIcon,
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  AlertTriangle,
+  Boxes,
+  Building,
+  Calendar,
+  CheckCircle2,
+  Download,
   FileCheck,
-  TrendingDown,
-  ArrowRight
+  FileSpreadsheet,
+  Filter,
+  Loader2,
+  Minus,
+  Plus,
+  Printer,
+  RotateCcw,
+  Save,
+  Search,
+  Send,
+  Warehouse as WarehouseIcon,
+  X,
 } from 'lucide-react';
+import { BIEventType } from '../../bi/types';
+import {
+  buildCycleCountSchedule,
+  buildWorkingDayDefinitions,
+  clearStocktakeDraft,
+  deriveStocktakeDayStatus,
+  exportStocktakeSpreadsheet,
+  filterStocktakeRows,
+  generateStocktakePdf,
+  getDefaultWorkingDay,
+  hasStocktakePermission,
+  loadStocktakeDraft,
+  loadStocktakeSettings,
+  resolveStocktakeRows,
+  saveStocktakeDraft,
+  StocktakeCountRow,
+  StocktakeDayStatus,
+  StocktakeExportContext,
+  StocktakeFilters,
+  summarizeStocktake,
+} from '../../features/stocktake';
+import { ApprovalRequest, Branch, Product, StaffMember, Warehouse } from '../../types';
 
 interface StocktakeWorkspaceProps {
   products: Product[];
@@ -31,10 +51,31 @@ interface StocktakeWorkspaceProps {
   branchStock: Record<string, number>;
   activeStaff: StaffMember;
   vendorId: string;
+  businessName: string;
+  approvalRequests?: ApprovalRequest[];
   currency?: string;
   onSubmitStocktakeApproval: (approvalPayload: any) => Promise<void>;
   onNavigateToApprovals?: () => void;
   onStockLocationChange?: (type: 'warehouse' | 'branch', id: string) => Promise<void>;
+  onLogBIEvent?: (eventType: BIEventType, details: Record<string, unknown>) => Promise<unknown> | void;
+}
+
+type PendingDayChange = { day: number } | null;
+type ExportScope = 'COMPLETE' | 'FILTERED';
+
+const STATUS_STYLES: Record<StocktakeDayStatus, string> = {
+  NOT_STARTED: 'bg-slate-100 text-slate-700',
+  IN_PROGRESS: 'bg-blue-100 text-blue-800',
+  DRAFT_SAVED: 'bg-blue-100 text-blue-800',
+  READY_FOR_REVIEW: 'bg-amber-100 text-amber-900',
+  SUBMITTED: 'bg-purple-100 text-purple-800',
+  APPROVED: 'bg-emerald-100 text-emerald-800',
+  REJECTED: 'bg-red-100 text-red-800',
+  COMPLETED: 'bg-emerald-100 text-emerald-800',
+};
+
+function formatStatus(status: StocktakeDayStatus): string {
+  return status.replaceAll('_', ' ').toLowerCase().replace(/(^|\s)\S/g, value => value.toUpperCase());
 }
 
 export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
@@ -45,875 +86,418 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
   branchStock,
   activeStaff,
   vendorId,
+  businessName,
+  approvalRequests = [],
   currency = '$',
   onSubmitStocktakeApproval,
   onNavigateToApprovals,
-  onStockLocationChange
+  onStockLocationChange,
+  onLogBIEvent,
 }) => {
-  // Location state
-  const [selectedLocationType, setSelectedLocationType] = useState<'warehouse' | 'branch'>('warehouse');
-  const [selectedLocationId, setSelectedLocationId] = useState<string>(
-    warehouses[0]?.id || branches[0]?.id || ''
-  );
-
-  // Calculate 26 working days schedule of current month (Mon - Sat, excluding Sundays & official holidays)
-  const workingDaysInfo = useMemo(() => {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = now.getMonth();
-    const totalDaysInMonth = new Date(year, month + 1, 0).getDate();
-
-    // Standard public holidays list
-    const holidays = ['01-01', '05-01', '12-25', '12-26'];
-
-    const workingDaysList: { dayNum: number; dateStr: string; dayOfWeekStr: string; dateObj: Date }[] = [];
-    let currentWorkingCount = 0;
-    let todayWorkingDayIndex = 1;
-
-    for (let d = 1; d <= totalDaysInMonth; d++) {
-      const dateObj = new Date(year, month, d);
-      const dayOfWeek = dateObj.getDay(); // 0 is Sunday
-      const monthDayStr = `${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-
-      const isSunday = dayOfWeek === 0;
-      const isHoliday = holidays.includes(monthDayStr);
-
-      if (!isSunday && !isHoliday) {
-        currentWorkingCount++;
-        const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-        workingDaysList.push({
-          dayNum: currentWorkingCount,
-          dateStr: dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-          dayOfWeekStr: dayNames[dayOfWeek],
-          dateObj
-        });
-
-        if (d <= now.getDate() && currentWorkingCount <= 26) {
-          todayWorkingDayIndex = currentWorkingCount;
-        }
-      }
-    }
-
-    const activeTodayIndex = Math.min(26, Math.max(1, todayWorkingDayIndex));
-    const isTodaySundayOrHoliday = now.getDay() === 0;
-
-    return {
-      workingDaysList,
-      totalWorkingDaysInMonth: currentWorkingCount,
-      activeTodayIndex,
-      isTodaySundayOrHoliday
-    };
-  }, []);
-
-  const defaultWorkingDay = workingDaysInfo.activeTodayIndex;
-
-  const [activeCycleDay, setActiveCycleDay] = useState<number>(defaultWorkingDay);
-  const [activeShelfFilter, setActiveShelfFilter] = useState<string>('ALL');
-  const [selectedDepartmentFilter, setSelectedDepartmentFilter] = useState<string>('ALL');
-  const [selectedBIFilter, setSelectedBIFilter] = useState<string>('ALL');
-
-  // Stocktake counted values: productId -> counted quantity
-  const [countedQuantities, setCountedQuantities] = useState<Record<string, number>>({});
+  const initialLocationType: 'warehouse' | 'branch' = warehouses.length ? 'warehouse' : 'branch';
+  const [selectedLocationType, setSelectedLocationType] = useState<'warehouse' | 'branch'>(initialLocationType);
+  const [selectedLocationId, setSelectedLocationId] = useState(warehouses[0]?.id || branches[0]?.id || '');
+  const [activeCycleDay, setActiveCycleDay] = useState(() => getDefaultWorkingDay(buildWorkingDayDefinitions()));
+  const [counts, setCounts] = useState<Record<string, number>>({});
   const [varianceReasons, setVarianceReasons] = useState<Record<string, string>>({});
-  const [searchTerm, setSearchTerm] = useState('');
-  const [showDiscrepancyOnly, setShowDiscrepancyOnly] = useState(false);
-
-  // Modal & Submission states
-  const [isBILossModalOpen, setIsBILossModalOpen] = useState(false);
+  const [filters, setFilters] = useState<StocktakeFilters>({ search: '', department: 'ALL', shelf: 'ALL', biCheck: 'ALL', varianceOnly: false, countState: 'ALL' });
+  const [dayStatuses, setDayStatuses] = useState<Record<number, StocktakeDayStatus>>({});
+  const [isDirty, setIsDirty] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isExporting, setIsExporting] = useState<'PDF' | 'XLSX' | 'CSV' | null>(null);
   const [submissionSuccess, setSubmissionSuccess] = useState<string | null>(null);
+  const [pendingDayChange, setPendingDayChange] = useState<PendingDayChange>(null);
+  const [showSubmitDialog, setShowSubmitDialog] = useState(false);
+  const [showPrintDialog, setShowPrintDialog] = useState(false);
+  const [showExportDialog, setShowExportDialog] = useState(false);
+  const [exportScope, setExportScope] = useState<ExportScope>('COMPLETE');
+  const settings = useMemo(() => loadStocktakeSettings(vendorId), [vendorId]);
+  const [blindCount, setBlindCount] = useState(settings.blindCountEnabled);
+  const [showSystemQuantity, setShowSystemQuantity] = useState(!settings.blindCountEnabled);
+  const [includeNotes, setIncludeNotes] = useState(true);
+  const [includeRecount, setIncludeRecount] = useState(true);
 
-  // Extract unique departments & shelves
-  const allDepartments = useMemo(() => {
-    return ['ALL', ...Array.from(new Set(products.filter(p => (p.productType || 'INVENTORY') === 'INVENTORY' && p.status !== 'archived').map(p => p.category)))];
-  }, [products]);
+  const canView = hasStocktakePermission(activeStaff.role, 'stocktake.view');
+  const canPerform = hasStocktakePermission(activeStaff.role, 'stocktake.perform');
+  const canDraft = hasStocktakePermission(activeStaff.role, 'stocktake.draft.save');
+  const canSubmit = hasStocktakePermission(activeStaff.role, 'stocktake.submit');
+  const canPrint = hasStocktakePermission(activeStaff.role, 'stocktake.print');
+  const canExport = hasStocktakePermission(activeStaff.role, 'stocktake.export');
+  const canViewSystemQuantity = hasStocktakePermission(activeStaff.role, 'stocktake.view_system_quantity');
+  const canViewValuation = hasStocktakePermission(activeStaff.role, 'stocktake.view_valuation');
 
-  // Extract and organize shelves across products
-  const allShelves = useMemo(() => {
-    const shelvesSet = new Set<string>();
-    products.forEach((p) => {
-      const shelfName = p.shelf || '';
-      if (shelfName) shelvesSet.add(shelfName);
-    });
-    return Array.from(shelvesSet).sort();
-  }, [products]);
-
-  // Calculate 26 Working Days Shelf Distribution
-  // Total shelves divided over 26 days
-  const shelvesDistribution = useMemo(() => {
-    const totalShelves = allShelves.length;
-    const shelvesPerDay = Math.max(1, Math.ceil(totalShelves / 26));
-
-    const schedule: Record<number, string[]> = {};
-    for (let day = 1; day <= 26; day++) {
-      const startIndex = (day - 1) * shelvesPerDay;
-      const dayShelves = allShelves.slice(startIndex, startIndex + shelvesPerDay);
-      schedule[day] = dayShelves;
+  useEffect(() => {
+    if (!selectedLocationId) {
+      const fallback = warehouses[0] || branches[0];
+      if (fallback) {
+        setSelectedLocationType(warehouses[0] ? 'warehouse' : 'branch');
+        setSelectedLocationId(fallback.id);
+      }
     }
+  }, [branches, selectedLocationId, warehouses]);
 
-    return {
-      totalShelves,
-      shelvesPerDay,
-      schedule
-    };
-  }, [allShelves]);
+  const selectedLocation = useMemo(() => selectedLocationType === 'warehouse'
+    ? warehouses.find(item => item.id === selectedLocationId)
+    : branches.find(item => item.id === selectedLocationId), [branches, selectedLocationId, selectedLocationType, warehouses]);
+  const currentLocationName = selectedLocation?.name || 'No stock location selected';
+  const currentStock = selectedLocationType === 'warehouse' ? warehouseStock : branchStock;
+  const locationAliases = useMemo(() => selectedLocation
+    ? [selectedLocation.id, selectedLocation.name, selectedLocation.code]
+    : [], [selectedLocation]);
+  const schedule = useMemo(() => buildCycleCountSchedule({
+    vendorId,
+    stockLocationId: selectedLocationId,
+    stockLocationAliases: locationAliases,
+    products,
+  }), [locationAliases, products, selectedLocationId, vendorId]);
+  const activeWorkingDay = schedule.workingDays[activeCycleDay - 1];
+  const assignedShelves = schedule.shelvesByDay[activeCycleDay] || [];
+  const dayRows = useMemo(() => selectedLocationId ? resolveStocktakeRows({
+    schedule,
+    workingDayNumber: activeCycleDay,
+    products,
+    stockLocation: { id: selectedLocationId, name: currentLocationName },
+    stock: currentStock,
+  }) : [], [activeCycleDay, currentLocationName, currentStock, products, schedule, selectedLocationId]);
+  const displayedRows = useMemo(() => filterStocktakeRows(dayRows, filters, counts), [counts, dayRows, filters]);
+  const summary = useMemo(() => summarizeStocktake(dayRows, counts), [counts, dayRows]);
+  const departments = useMemo(() => ['ALL', ...Array.from(new Set(dayRows.map(row => row.category))).sort()], [dayRows]);
+  const shelves = useMemo(() => ['ALL', ...Array.from(new Set(dayRows.map(row => row.shelfCode))).sort()], [dayRows]);
+  const workflowStatuses = useMemo(() => {
+    const statuses: Record<number, StocktakeDayStatus> = {};
+    approvalRequests
+      .filter(request => request.entityType === 'STOCKTAKE_ADJUSTMENT'
+        && request.dataPayload?.cycleId === schedule.cycleId
+        && request.dataPayload?.locationId === selectedLocationId)
+      .forEach(request => {
+        const day = Number(request.dataPayload.stocktakeDay);
+        if (!Number.isInteger(day)) return;
+        if (request.status === 'COMPLETED') statuses[day] = 'COMPLETED';
+        else if (request.status === 'APPROVED') statuses[day] = 'APPROVED';
+        else if (request.status === 'REJECTED' || request.status === 'FAILED' || request.status === 'CANCELLED') statuses[day] = 'REJECTED';
+        else statuses[day] = 'SUBMITTED';
+      });
+    return statuses;
+  }, [approvalRequests, schedule.cycleId, selectedLocationId]);
+  const localDayStatus = dayStatuses[activeCycleDay];
+  const currentStatus = workflowStatuses[activeCycleDay] || deriveStocktakeDayStatus({ rowCount: dayRows.length, countedCount: summary.countedCount, draftSaved: localDayStatus === 'DRAFT_SAVED', submitted: localDayStatus === 'SUBMITTED', rejected: localDayStatus === 'REJECTED' });
+  const isLocked = ['SUBMITTED', 'APPROVED', 'COMPLETED'].includes(currentStatus);
+  const correlationId = `${schedule.cycleId}:${activeCycleDay}:${selectedLocationId}`;
 
-  // Today's scheduled shelves
-  const todayAssignedShelves = shelvesDistribution.schedule[activeCycleDay] || [];
+  const eventDetails = (extra: Record<string, unknown> = {}) => ({
+    tenantId: vendorId,
+    vendorId,
+    actorId: activeStaff.id,
+    cycleId: schedule.cycleId,
+    workingDayNumber: activeCycleDay,
+    stockLocationId: selectedLocationId,
+    shelfIds: assignedShelves,
+    productCount: dayRows.length,
+    countStatus: currentStatus,
+    correlationId,
+    timestamp: new Date().toISOString(),
+    ...extra,
+  });
 
-  // Active stock balances for chosen location
-  const currentStockMap = useMemo(() => {
-    return selectedLocationType === 'warehouse' ? warehouseStock : branchStock;
-  }, [selectedLocationType, warehouseStock, branchStock]);
+  useEffect(() => {
+    if (!canView || !selectedLocationId) return;
+    const draft = loadStocktakeDraft(vendorId, schedule.cycleId, selectedLocationId, activeCycleDay, activeStaff.role);
+    setCounts(draft?.counts || {});
+    setVarianceReasons(draft?.reasons || {});
+    setIsDirty(false);
+    if (draft) setDayStatuses(previous => ({ ...previous, [activeCycleDay]: 'DRAFT_SAVED' }));
+  }, [activeCycleDay, activeStaff.role, canView, schedule.cycleId, selectedLocationId, vendorId]);
 
-  const currentLocationName = useMemo(() => {
-    if (selectedLocationType === 'warehouse') {
-      return warehouses.find(w => w.id === selectedLocationId)?.name || 'Central Warehouse';
-    } else {
-      return branches.find(b => b.id === selectedLocationId)?.name || 'Store Branch';
-    }
-  }, [selectedLocationType, selectedLocationId, warehouses, branches]);
+  useEffect(() => {
+    if (!canView || !selectedLocationId) return;
+    const eventType: BIEventType = dayRows.length ? 'STOCKTAKE_COUNT_LIST_LOADED' : 'STOCKTAKE_COUNT_LIST_EMPTY';
+    void onLogBIEvent?.(eventType, eventDetails({ outcome: dayRows.length ? 'loaded' : 'empty' }));
+  // Log once for each authoritative selected-day scope.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCycleDay, schedule.cycleId, selectedLocationId, dayRows.length]);
 
-  // Filter products by search, department, shelf, or BI anomaly
-  const displayedProducts = useMemo(() => {
-    return products.filter((p) => {
-      if ((p.productType || 'INVENTORY') !== 'INVENTORY' || p.status === 'archived') return false;
-      const pShelf = p.shelf || '';
-      const matchesSearch = p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                            p.sku.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                            pShelf.toLowerCase().includes(searchTerm.toLowerCase());
+  if (!canView) {
+    return <div className="border border-red-300 bg-red-50 p-6 text-red-900 font-bold">You do not have permission to view or export this stocktake list.</div>;
+  }
 
-      const matchesShelf = activeShelfFilter === 'ALL' || pShelf === activeShelfFilter;
-      const matchesDepartment = selectedDepartmentFilter === 'ALL' || p.category === selectedDepartmentFilter;
-
-      const systemQty = currentStockMap[p.id] || 0;
-      const countedQty = countedQuantities[p.id] !== undefined ? countedQuantities[p.id] : systemQty;
-      const isDiscrepancy = countedQty !== systemQty;
-
-      const matchesDiscrepancyFilter = !showDiscrepancyOnly || isDiscrepancy;
-
-      // BI Anomaly check
-      let matchesBI = true;
-      if (selectedBIFilter === 'HIGH_VALUE_EXPOSURE') {
-        matchesBI = (p.sellingPrice || p.costPrice || 0) >= 100;
-      } else if (selectedBIFilter !== 'ALL') {
-        matchesBI = false;
-      }
-
-      return matchesSearch && matchesShelf && matchesDepartment && matchesDiscrepancyFilter && matchesBI;
-    });
-  }, [products, searchTerm, activeShelfFilter, selectedDepartmentFilter, selectedBIFilter, currentStockMap, countedQuantities, showDiscrepancyOnly]);
-
-  // Load Today's Scheduled Shelves into form
-  const handleLoadScheduledShelves = () => {
-    if (todayAssignedShelves.length > 0) {
-      setActiveShelfFilter(todayAssignedShelves[0]);
-    } else {
-      setActiveShelfFilter('ALL');
-    }
-  };
-
-  // Pre-fill quantities from BI Flagged items modal
-  const handleLoadFlaggedItemsToForm = (flaggedProducts: Product[]) => {
-    setActiveShelfFilter('ALL');
-    setShowDiscrepancyOnly(false);
-    // Expand search or focus on flagged items
-    const newCounts = { ...countedQuantities };
-    flaggedProducts.forEach(p => {
-      if (newCounts[p.id] === undefined) {
-        newCounts[p.id] = currentStockMap[p.id] || 0;
-      }
-    });
-    setCountedQuantities(newCounts);
-  };
-
-  // Update item count
-  const handleCountChange = (productId: string, val: number) => {
-    setCountedQuantities(prev => ({
-      ...prev,
-      [productId]: Math.max(0, val)
-    }));
-  };
-
-  const handleReasonChange = (productId: string, reason: string) => {
-    setVarianceReasons(prev => ({
-      ...prev,
-      [productId]: reason
-    }));
-  };
-
-  // Reset all counts back to system defaults
-  const handleResetCounts = () => {
-    if (window.confirm('Reset all counted values back to current system stock?')) {
-      setCountedQuantities({});
-      setVarianceReasons({});
-    }
-  };
-
-  // Stocktake Summary Metrics
-  const summaryMetrics = useMemo(() => {
-    let totalItems = 0;
-    let countedItemsCount = 0;
-    let matchingCount = 0;
-    let discrepancyCount = 0;
-    let totalShrinkageValue = 0;
-    let totalSurplusValue = 0;
-
-    products.filter(p => (p.productType || 'INVENTORY') === 'INVENTORY' && p.status !== 'archived').forEach(p => {
-      totalItems++;
-      const sysQty = currentStockMap[p.id] || 0;
-      const cntQty = countedQuantities[p.id] !== undefined ? countedQuantities[p.id] : sysQty;
-      
-      if (countedQuantities[p.id] !== undefined) {
-        countedItemsCount++;
-      }
-
-      const diff = cntQty - sysQty;
-      const unitCost = p.costPrice || 0;
-
-      if (diff === 0) {
-        matchingCount++;
-      } else if (diff < 0) {
-        discrepancyCount++;
-        totalShrinkageValue += Math.abs(diff) * unitCost;
-      } else {
-        discrepancyCount++;
-        totalSurplusValue += diff * unitCost;
-      }
-    });
-
-    const netVarianceValue = totalSurplusValue - totalShrinkageValue;
-
-    return {
-      totalItems,
-      countedItemsCount,
-      matchingCount,
-      discrepancyCount,
-      totalShrinkageValue,
-      totalSurplusValue,
-      netVarianceValue
-    };
-  }, [products, currentStockMap, countedQuantities]);
-
-  // Submit Stocktake Approval
-  const handleSubmitApproval = async () => {
-    // Collect all items where count was explicitly entered or differs from system
-    const adjustmentItems: {
-      productId: string;
-      productName: string;
-      systemQty: number;
-      countedQty: number;
-      quantityDelta: number;
-      costPrice: number;
-      reason: string;
-    }[] = [];
-
-    products.filter(p => (p.productType || 'INVENTORY') === 'INVENTORY' && p.status !== 'archived').forEach((p) => {
-      const sysQty = currentStockMap[p.id] || 0;
-      const cntQty = countedQuantities[p.id] !== undefined ? countedQuantities[p.id] : sysQty;
-      const delta = cntQty - sysQty;
-
-      if (delta !== 0) {
-        const defaultReason = delta < 0 ? 'Suspected Theft / Physical Shrinkage' : 'Surplus Intake / Recount Match';
-        adjustmentItems.push({
-          productId: p.id,
-          productName: p.name,
-          systemQty: sysQty,
-          countedQty: cntQty,
-          quantityDelta: delta,
-          costPrice: p.costPrice || 0,
-          reason: varianceReasons[p.id] || defaultReason
-        });
-      }
-    });
-
-    if (adjustmentItems.length === 0) {
-      alert('No inventory variances recorded. All physical counts match live system balances.');
+  const applyDay = async (day: number) => {
+    if (!Number.isInteger(day) || day < 1 || day > 26) {
+      setLoadError('Unable to load the assigned count list. Invalid working day.');
       return;
     }
+    setIsLoading(true);
+    setLoadError(null);
+    setSubmissionSuccess(null);
+    setFilters(previous => ({ ...previous, search: '', department: 'ALL', shelf: 'ALL', biCheck: 'ALL', varianceOnly: false, countState: 'ALL' }));
+    await Promise.resolve();
+    setActiveCycleDay(day);
+    setIsLoading(false);
+    void onLogBIEvent?.('STOCKTAKE_WORKING_DAY_SELECTED', eventDetails({ workingDayNumber: day, outcome: 'selected' }));
+  };
 
+  const requestDayChange = (day: number) => {
+    if (day === activeCycleDay) return;
+    if (isDirty) {
+      setPendingDayChange({ day });
+      void onLogBIEvent?.('STOCKTAKE_DAY_CHANGED_WITH_UNSAVED_COUNTS', eventDetails({ targetWorkingDayNumber: day, outcome: 'prompted' }));
+      return;
+    }
+    void applyDay(day);
+  };
+
+  const saveDraft = () => {
+    const draft = saveStocktakeDraft({ vendorId, cycleId: schedule.cycleId, stockLocationId: selectedLocationId, workingDayNumber: activeCycleDay, counts, reasons: varianceReasons, savedBy: activeStaff.id }, activeStaff.role);
+    setIsDirty(false);
+    setDayStatuses(previous => ({ ...previous, [activeCycleDay]: 'DRAFT_SAVED' }));
+    void onLogBIEvent?.('STOCKTAKE_DRAFT_SAVED', eventDetails({ outcome: 'saved', savedAt: draft.savedAt }));
+  };
+
+  const saveDraftAndContinue = () => {
+    if (!pendingDayChange) return;
+    saveDraft();
+    const target = pendingDayChange.day;
+    setPendingDayChange(null);
+    void applyDay(target);
+  };
+
+  const discardAndContinue = () => {
+    if (!pendingDayChange) return;
+    clearStocktakeDraft(vendorId, schedule.cycleId, selectedLocationId, activeCycleDay);
+    const target = pendingDayChange.day;
+    setCounts({}); setVarianceReasons({}); setIsDirty(false); setPendingDayChange(null);
+    void applyDay(target);
+  };
+
+  const changeLocation = async (type: 'warehouse' | 'branch', id: string) => {
+    if (isDirty && !window.confirm('Discard unsaved counts and change stock location?')) return;
+    setIsLoading(true); setLoadError(null); setCounts({}); setVarianceReasons({}); setIsDirty(false);
+    setSelectedLocationType(type); setSelectedLocationId(id);
+    try { await onStockLocationChange?.(type, id); }
+    catch { setLoadError('Unable to load the assigned count list.'); }
+    finally { setIsLoading(false); }
+  };
+
+  const updateCount = (productId: string, value: number) => {
+    if (!canPerform || isLocked) return;
+    setCounts(previous => ({ ...previous, [productId]: Math.max(0, value) }));
+    setIsDirty(true);
+    setDayStatuses(previous => ({ ...previous, [activeCycleDay]: 'IN_PROGRESS' }));
+  };
+
+  const updateReason = (productId: string, reason: string) => {
+    if (!canPerform || isLocked) return;
+    setVarianceReasons(previous => ({ ...previous, [productId]: reason }));
+    setIsDirty(true);
+  };
+
+  const resetCounts = () => {
+    if (!canPerform || isLocked || !window.confirm('Reset all entered counts for this working day?')) return;
+    setCounts({}); setVarianceReasons({}); setIsDirty(false);
+    clearStocktakeDraft(vendorId, schedule.cycleId, selectedLocationId, activeCycleDay);
+    setDayStatuses(previous => ({ ...previous, [activeCycleDay]: 'NOT_STARTED' }));
+  };
+
+  const exportContext = (rows: StocktakeCountRow[]): StocktakeExportContext => ({
+    vendorId,
+    businessName,
+    actor: { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role },
+    cycleId: schedule.cycleId,
+    workingDayNumber: activeCycleDay,
+    scheduledDate: activeWorkingDay?.scheduledDate || '',
+    stockLocationId: selectedLocationId,
+    stockLocationName: currentLocationName,
+    shelfIds: assignedShelves,
+    rows,
+    blindCountMode: blindCount,
+  });
+
+  const rowsForExport = exportScope === 'FILTERED' ? displayedRows : dayRows;
+  const runPdfExport = async (action: 'open' | 'download') => {
+    setIsExporting('PDF');
+    try {
+      await generateStocktakePdf(exportContext(rowsForExport), { action, includeNotes, includeRecount, showSystemQuantity: showSystemQuantity && !blindCount });
+      await onLogBIEvent?.('STOCKTAKE_COUNT_LIST_PDF_GENERATED', eventDetails({ exportFormat: 'PDF', outcome: 'completed', scope: exportScope, blindCountMode: blindCount, productCount: rowsForExport.length }));
+      setShowPrintDialog(false);
+    } catch (error) {
+      await onLogBIEvent?.('STOCKTAKE_EXPORT_DENIED', eventDetails({ exportFormat: 'PDF', outcome: 'denied', reasonCode: error instanceof Error ? error.message : 'EXPORT_FAILED' }));
+      alert(error instanceof Error ? error.message : 'Unable to prepare PDF.');
+    } finally { setIsExporting(null); }
+  };
+
+  const runSpreadsheetExport = async (format: 'XLSX' | 'CSV') => {
+    setIsExporting(format);
+    try {
+      await exportStocktakeSpreadsheet(exportContext(rowsForExport), { format, showSystemQuantity: showSystemQuantity && !blindCount });
+      await onLogBIEvent?.(format === 'XLSX' ? 'STOCKTAKE_COUNT_LIST_XLSX_EXPORTED' : 'STOCKTAKE_COUNT_LIST_CSV_EXPORTED', eventDetails({ exportFormat: format, outcome: 'completed', scope: exportScope, blindCountMode: blindCount, productCount: rowsForExport.length }));
+      setShowExportDialog(false);
+    } catch (error) {
+      await onLogBIEvent?.('STOCKTAKE_EXPORT_DENIED', eventDetails({ exportFormat: format, outcome: 'denied', reasonCode: error instanceof Error ? error.message : 'EXPORT_FAILED' }));
+      alert(error instanceof Error ? error.message : 'Unable to prepare spreadsheet.');
+    } finally { setIsExporting(null); }
+  };
+
+  const validationError = () => {
+    if (!selectedLocationId) return 'Select a stock location.';
+    if (!activeWorkingDay) return 'Select a valid working day.';
+    if (!dayRows.length) return `No products are assigned to Working Day ${activeCycleDay} for the selected location.`;
+    if (summary.remainingCount) return `${summary.remainingCount} assigned products still require a physical count.`;
+    const unresolved = dayRows.filter(row => counts[row.productId] !== row.systemQuantity && !varianceReasons[row.productId]);
+    if (unresolved.length) return `${unresolved.length} variance rows require an audit reason.`;
+    if (!summary.discrepancyCount) return 'No inventory variances are available for manager approval.';
+    if (!canSubmit) return 'You do not have permission to submit stocktake counts.';
+    if (isLocked) return 'This working day has already been submitted.';
+    return null;
+  };
+
+  const submitApproval = async () => {
+    const error = validationError();
+    if (error) { alert(error); return; }
+    const items = dayRows.flatMap(row => {
+      const countedQty = counts[row.productId];
+      const quantityDelta = countedQty - row.systemQuantity;
+      return quantityDelta === 0 ? [] : [{
+        productId: row.productId,
+        productName: row.productName,
+        systemQty: row.systemQuantity,
+        countedQty,
+        quantityDelta,
+        costPrice: row.costPrice,
+        reason: varianceReasons[row.productId],
+      }];
+    });
     setIsSubmitting(true);
     try {
-      const payload = {
-        title: `Stocktake Physical Audit Adjustment (${currentLocationName})`,
-        description: `Physical stock audit conducted for ${currentLocationName} (Day ${activeCycleDay}/26 Cycle). ${adjustmentItems.length} SKU variance adjustments submitted for authorization.`,
+      await onSubmitStocktakeApproval({
+        title: `Stocktake Working Day ${activeCycleDay} (${currentLocationName})`,
+        description: `Working Day ${activeCycleDay} cycle count for ${currentLocationName}. ${items.length} variance adjustments submitted for manager approval.`,
+        idempotencyKey: correlationId,
         dataPayload: {
           locationType: selectedLocationType,
           locationId: selectedLocationId,
           locationName: currentLocationName,
+          cycleId: schedule.cycleId,
           stocktakeDay: activeCycleDay,
-          totalVariances: adjustmentItems.length,
-          netValuation: summaryMetrics.netVarianceValue,
-          items: adjustmentItems
-        }
-      };
-
-      await onSubmitStocktakeApproval(payload);
-      setSubmissionSuccess(`Stocktake audit submitted successfully! ${adjustmentItems.length} inventory variance requests are now pending Manager approval in the Approvals workspace.`);
-    } catch (err) {
-      console.error(err);
-      alert('Error submitting stocktake request.');
-    } finally {
-      setIsSubmitting(false);
-    }
+          scheduledDate: activeWorkingDay?.scheduledDate,
+          shelfIds: assignedShelves,
+          productCount: dayRows.length,
+          totalVariances: items.length,
+          netValuation: summary.netVarianceValue,
+          correlationId,
+          items,
+        },
+      });
+      clearStocktakeDraft(vendorId, schedule.cycleId, selectedLocationId, activeCycleDay);
+      setIsDirty(false); setShowSubmitDialog(false);
+      setDayStatuses(previous => ({ ...previous, [activeCycleDay]: 'SUBMITTED' }));
+      setSubmissionSuccess(`Working Day ${activeCycleDay} was submitted once to the Manager Approvals Queue. Stock remains unchanged until approval.`);
+      await onLogBIEvent?.('STOCKTAKE_SUBMITTED_FOR_APPROVAL', eventDetails({ outcome: 'submitted', discrepancyCount: items.length }));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Error submitting stocktake request.');
+    } finally { setIsSubmitting(false); }
   };
 
-  return (
-    <div className="space-y-6">
-      
-      {/* Header Banner */}
-      <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl border border-slate-800 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-        <div className="flex items-center gap-3.5">
-          <div className="w-12 h-12 rounded-2xl bg-[#FF6600]/20 text-[#FF6600] border border-[#FF6600]/30 flex items-center justify-center font-extrabold shadow-inner shrink-0">
-            <Boxes className="w-6 h-6" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h1 className="text-xl font-extrabold text-white">Stocktake & Physical Audit Workspace</h1>
-              <span className="bg-[#FF6600] text-white text-[10px] font-black px-2.5 py-0.5 rounded-full uppercase tracking-wider">
-                26-Day Cycle Schedule
-              </span>
-            </div>
-            <p className="text-xs sm:text-sm text-slate-300 mt-1">
-              Conduct daily shelf counts, trigger immediate BI loss checks, and submit inventory quantity adjustments for manager approval.
-            </p>
-          </div>
+  const submitDisabled = isSubmitting || isLoading || !canSubmit || isLocked || !dayRows.length || summary.remainingCount > 0 || summary.discrepancyCount === 0;
+  const visibleSystemQuantity = canViewSystemQuantity && !settings.blindCountEnabled;
+
+  return <div className="space-y-5">
+    <header data-testid="stocktake-sticky-header" className="sticky top-[52px] lg:top-0 z-20 bg-[#1F242D] text-white border-b-2 border-[#FF6600] shadow-md p-4">
+      <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap"><Boxes className="w-5 text-[#FF6600]" /><h1 className="font-black text-lg">Stocktake &amp; Physical Audit Workspace</h1><span className={`px-2 py-1 text-[10px] font-black ${STATUS_STYLES[currentStatus]}`}>{formatStatus(currentStatus)}</span></div>
+          <p className="text-xs text-slate-300 mt-1">{currentLocationName} · Working Day {activeCycleDay} · {activeWorkingDay?.dayOfWeekLabel} {activeWorkingDay?.dateLabel}</p>
+          <p className="text-xs text-slate-400 truncate">Scope: {assignedShelves.join(', ') || 'No assigned shelves'} · {summary.productCount} products · {summary.countedCount} counted · {summary.discrepancyCount} variances{canViewValuation ? ` · Net ${currency}${summary.netVarianceValue.toFixed(2)}` : ''}</p>
         </div>
-
-        <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
-          <button
-            onClick={() => setIsBILossModalOpen(true)}
-            className="flex-1 md:flex-initial px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer animate-bounce-subtle"
-          >
-            <ShieldAlert className="w-4 h-4" />
-            <span>⚡ BI Loss & Theft Checks</span>
-          </button>
-
-          {onNavigateToApprovals && (
-            <button
-              onClick={onNavigateToApprovals}
-              className="flex-1 md:flex-initial px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-xs sm:text-sm border border-slate-700 flex items-center justify-center gap-2 transition-all cursor-pointer"
-            >
-              <FileCheck className="w-4 h-4 text-[#FF6600]" />
-              <span>Approvals Queue</span>
-            </button>
-          )}
+        <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2 xl:justify-end">
+          {canDraft && <button onClick={saveDraft} disabled={!isDirty || isLocked} className="px-3 py-2 border border-slate-500 disabled:opacity-40 font-bold text-xs flex justify-center gap-2"><Save className="w-4" />Save Draft</button>}
+          {onNavigateToApprovals && activeStaff.grantedMenuIds.includes('approvals') && <button onClick={onNavigateToApprovals} className="px-3 py-2 border border-slate-500 font-bold text-xs flex justify-center gap-2"><FileCheck className="w-4 text-[#FF6600]" />Approvals Queue</button>}
+          <button onClick={() => setShowPrintDialog(true)} disabled={!canPrint || !dayRows.length || Boolean(isExporting)} className="px-3 py-2 border border-slate-500 disabled:opacity-40 font-bold text-xs flex justify-center gap-2"><Printer className="w-4" />Print Count List</button>
+          <button onClick={() => setShowExportDialog(true)} disabled={!canExport || !dayRows.length || Boolean(isExporting)} className="px-3 py-2 border border-slate-500 disabled:opacity-40 font-bold text-xs flex justify-center gap-2"><FileSpreadsheet className="w-4" />Export Spreadsheet</button>
+          <button data-testid="stocktake-submit-header" onClick={() => { const error = validationError(); if (error) alert(error); else setShowSubmitDialog(true); }} disabled={submitDisabled} className="col-span-2 px-4 py-2.5 bg-[#FF6600] hover:bg-[#E65C00] disabled:opacity-40 font-black text-xs flex justify-center gap-2 sm:min-w-64"><Send className="w-4" />{isSubmitting ? 'Submitting stocktake for manager approval…' : 'Submit Stocktake for Manager Approval'}</button>
         </div>
       </div>
+    </header>
 
-      {/* Location Selector & 26-Day Cycle Calculator Dashboard */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        {/* Left Card: Location & Audit Scope */}
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-            <div className="flex items-center gap-2">
-              <Building className="w-4 h-4 text-[#FF6600]" />
-              <h2 className="text-sm font-bold text-slate-900">Audit Location Scope</h2>
-            </div>
-            <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded font-mono font-bold uppercase">
-              Target
-            </span>
-          </div>
-
-          <div className="space-y-3">
-            <div>
-              <label className="text-xs font-bold text-slate-700 block mb-1">Select Location Type</label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setSelectedLocationType('warehouse');
-                    if (warehouses[0]) { setSelectedLocationId(warehouses[0].id); await onStockLocationChange?.('warehouse', warehouses[0].id); }
-                  }}
-                  className={`p-2.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                    selectedLocationType === 'warehouse'
-                      ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
-                      : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
-                  }`}
-                >
-                  <WarehouseIcon className="w-4 h-4 text-[#FF6600]" />
-                  <span>Central Depot</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setSelectedLocationType('branch');
-                    if (branches[0]) { setSelectedLocationId(branches[0].id); await onStockLocationChange?.('branch', branches[0].id); }
-                  }}
-                  className={`p-2.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                    selectedLocationType === 'branch'
-                      ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
-                      : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
-                  }`}
-                >
-                  <Building className="w-4 h-4 text-[#FF6600]" />
-                  <span>Store Branch</span>
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label className="text-xs font-bold text-slate-700 block mb-1">
-                {selectedLocationType === 'warehouse' ? 'Select Warehouse Depot' : 'Select Retail Branch'}
-              </label>
-              <select
-                value={selectedLocationId}
-                onChange={async (e) => { setSelectedLocationId(e.target.value); await onStockLocationChange?.(selectedLocationType, e.target.value); }}
-                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-[#FF6600]"
-              >
-                {selectedLocationType === 'warehouse' ? (
-                  warehouses.map(w => (
-                    <option key={w.id} value={w.id}>{w.name} ({w.location})</option>
-                  ))
-                ) : (
-                  branches.map(b => (
-                    <option key={b.id} value={b.id}>{b.name} ({b.address})</option>
-                  ))
-                )}
-              </select>
-            </div>
-
-            <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 flex items-start gap-2">
-              <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-              <div>
-                <strong className="block font-bold">Governance Rule:</strong>
-                <span>Stock adjustments submitted from this form will NOT alter stock immediately. They enter the Manager Approval workflow for review.</span>
-              </div>
-            </div>
-          </div>
+    <section className="grid lg:grid-cols-3 gap-4">
+      <div className="bg-white border border-slate-300 p-4 space-y-3">
+        <h2 className="font-black text-sm flex gap-2"><Building className="w-4 text-[#FF6600]" />Stock Location</h2>
+        <div className="grid grid-cols-2 gap-2">
+          <button onClick={() => warehouses[0] && changeLocation('warehouse', warehouses[0].id)} className={`border p-2 text-xs font-bold flex justify-center gap-2 ${selectedLocationType === 'warehouse' ? 'bg-slate-900 text-white' : ''}`}><WarehouseIcon className="w-4" />Warehouse</button>
+          <button onClick={() => branches[0] && changeLocation('branch', branches[0].id)} className={`border p-2 text-xs font-bold flex justify-center gap-2 ${selectedLocationType === 'branch' ? 'bg-slate-900 text-white' : ''}`}><Building className="w-4" />Branch</button>
         </div>
-
-        {/* Middle & Right: 26 Working Days Shelf Schedule Calculator */}
-        <div className="lg:col-span-2 bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
-            <div className="flex items-center gap-2">
-              <Calendar className="w-4 h-4 text-[#FF6600]" />
-              <h2 className="text-sm font-bold text-slate-900">26 Working Days Cycle Count Calculator</h2>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] font-bold text-[#FF6600] bg-orange-50 px-2.5 py-1 rounded-lg border border-orange-200">
-                Mon–Sat Cycle (Excludes Sundays & Public Holidays)
-              </span>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-              <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Active Working Day</div>
-              <div className="text-xl font-extrabold text-slate-900 mt-0.5">
-                Working Day {activeCycleDay} <span className="text-xs font-normal text-slate-500">of 26</span>
-              </div>
-              <div className="text-[10px] text-[#FF6600] font-bold mt-1">
-                {workingDaysInfo.workingDaysList[activeCycleDay - 1]
-                  ? `${workingDaysInfo.workingDaysList[activeCycleDay - 1].dayOfWeekStr}, ${workingDaysInfo.workingDaysList[activeCycleDay - 1].dateStr}`
-                  : 'Week Working Day'}
-              </div>
-            </div>
-
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-              <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Today's Assigned Shelves</div>
-              <div className="text-sm font-bold text-slate-900 mt-1 truncate">
-                {todayAssignedShelves.length > 0 ? todayAssignedShelves.join(', ') : 'All Shelves Covered'}
-              </div>
-              <div className="text-[10px] text-slate-500 mt-1">{todayAssignedShelves.length} Shelves scheduled today</div>
-            </div>
-
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex flex-col justify-center">
-              <button
-                onClick={handleLoadScheduledShelves}
-                className="w-full py-2 bg-slate-900 hover:bg-black text-white text-xs font-bold rounded-lg shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <Zap className="w-3.5 h-3.5 text-[#FF6600]" />
-                <span>Filter Today's Scheduled Shelves</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Day Selector Buttons Grid */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-bold text-slate-700">26 Working Day Calendar (1 - 26):</span>
-              <span className="text-[11px] text-slate-500 font-medium">Click any working day to inspect assigned shelves</span>
-            </div>
-
-            <div className="grid grid-cols-13 sm:grid-cols-13 gap-1 overflow-x-auto pb-1 scrollbar-none">
-              {Array.from({ length: 26 }, (_, i) => i + 1).map((dayNum) => {
-                const isSelected = activeCycleDay === dayNum;
-                const isToday = dayNum === defaultWorkingDay;
-                const dayInfo = workingDaysInfo.workingDaysList[dayNum - 1];
-
-                return (
-                  <button
-                    key={dayNum}
-                    type="button"
-                    title={dayInfo ? `Working Day ${dayNum}: ${dayInfo.dayOfWeekStr}, ${dayInfo.dateStr} (Excludes Sundays & Holidays)` : `Working Day ${dayNum}`}
-                    onClick={() => {
-                      setActiveCycleDay(dayNum);
-                      const dayShelves = shelvesDistribution.schedule[dayNum] || [];
-                      if (dayShelves.length > 0) {
-                        setActiveShelfFilter(dayShelves[0]);
-                      } else {
-                        setActiveShelfFilter('ALL');
-                      }
-                    }}
-                    className={`h-9 rounded-lg text-xs font-bold flex flex-col items-center justify-center transition-all cursor-pointer relative ${
-                      isSelected
-                        ? 'bg-[#FF6600] text-white shadow-sm ring-2 ring-[#FF6600]/30 font-black'
-                        : isToday
-                        ? 'bg-slate-900 text-white font-extrabold'
-                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-                    }`}
-                  >
-                    <span>{dayNum}</span>
-                    {isToday && !isSelected && <span className="w-1 h-1 rounded-full bg-[#FF6600]"></span>}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
+        <select aria-label="Stocktake location" value={selectedLocationId} onChange={event => changeLocation(selectedLocationType, event.target.value)} className="w-full border border-slate-300 p-2 text-xs font-bold">
+          {(selectedLocationType === 'warehouse' ? warehouses : branches).map(item => <option key={item.id} value={item.id}>{item.code} · {item.name}</option>)}
+        </select>
+        <div className="bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900"><strong>Governance:</strong> Counts remain drafts or approval proposals. They never directly alter inventory.</div>
+      </div>
+      <div className="lg:col-span-2 bg-white border border-slate-300 p-4">
+        <div className="flex justify-between gap-3 mb-3"><div><h2 className="font-black text-sm flex gap-2"><Calendar className="w-4 text-[#FF6600]" />26 Working Day Cycle</h2><p className="text-xs text-slate-500">Selecting a day loads only its explicit shelf and product assignments.</p></div><div className="text-right text-xs"><strong>{assignedShelves.length}</strong> shelves<br /><strong>{dayRows.length}</strong> products</div></div>
+        <div className="grid grid-cols-7 sm:grid-cols-13 gap-1.5">
+          {schedule.workingDays.map(day => {
+            const status = day.workingDayNumber === activeCycleDay ? currentStatus : workflowStatuses[day.workingDayNumber] || dayStatuses[day.workingDayNumber] || 'NOT_STARTED';
+            const selected = activeCycleDay === day.workingDayNumber;
+            return <button key={day.workingDayNumber} type="button" aria-label={`Working Day ${day.workingDayNumber}, ${formatStatus(status)}`} title={`Working Day ${day.workingDayNumber}: ${day.dayOfWeekLabel}, ${day.dateLabel} · ${formatStatus(status)}`} onClick={() => requestDayChange(day.workingDayNumber)} className={`h-10 border text-xs font-black relative ${selected ? 'bg-[#FF6600] text-white border-[#FF6600] ring-2 ring-orange-200' : STATUS_STYLES[status]}`}><span>{day.workingDayNumber}</span><span className="sr-only">{formatStatus(status)}</span></button>;
+          })}
         </div>
       </div>
+    </section>
 
-      {/* Stocktake Audit Summary Banner */}
-      <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs grid grid-cols-2 md:grid-cols-5 gap-4 divide-y md:divide-y-0 md:divide-x divide-slate-100">
-        <div className="p-2">
-          <div className="text-xs font-semibold text-slate-500">Catalog SKUs</div>
-          <div className="text-lg font-black text-slate-900 mt-0.5">{summaryMetrics.totalItems} Items</div>
-          <div className="text-[11px] text-slate-400 mt-0.5">Total in scope</div>
-        </div>
+    <section className="grid grid-cols-2 md:grid-cols-6 border border-slate-300 bg-white">
+      {[['Products', summary.productCount], ['Shelves', assignedShelves.length], ['Counted', summary.countedCount], ['Remaining', summary.remainingCount], ['Discrepancies', summary.discrepancyCount], ['Status', formatStatus(currentStatus)]].map(([label, value]) => <div key={String(label)} className="p-3 border-r border-b md:border-b-0 border-slate-200"><div className="text-[10px] uppercase text-slate-500 font-bold">{label}</div><div className="font-black text-sm mt-1">{value}</div></div>)}
+    </section>
 
-        <div className="p-2 pt-4 md:pt-2">
-          <div className="text-xs font-semibold text-slate-500">Counted / Recounted</div>
-          <div className="text-lg font-black text-slate-900 mt-0.5">{summaryMetrics.countedItemsCount} SKUs</div>
-          <div className="text-[11px] text-emerald-600 font-bold mt-0.5">{summaryMetrics.matchingCount} Exact Matches</div>
-        </div>
+    {submissionSuccess && <div className="p-4 border border-emerald-300 bg-emerald-50 text-emerald-900 flex justify-between gap-3"><span className="flex gap-2 text-sm"><CheckCircle2 className="w-5" />{submissionSuccess}</span><button onClick={() => setSubmissionSuccess(null)}><X className="w-4" /></button></div>}
+    {loadError && <div className="p-4 border border-red-300 bg-red-50 text-red-900 flex gap-2"><AlertTriangle className="w-5" />{loadError}</div>}
 
-        <div className="p-2 pt-4 md:pt-2">
-          <div className="text-xs font-semibold text-slate-500">Variances Flagged</div>
-          <div className={`text-lg font-black mt-0.5 ${summaryMetrics.discrepancyCount > 0 ? 'text-red-600' : 'text-slate-900'}`}>
-            {summaryMetrics.discrepancyCount} Discrepancies
-          </div>
-          <div className="text-[11px] text-slate-400 mt-0.5">Require Manager Review</div>
-        </div>
+    <section className="bg-white border border-slate-300 p-3 flex flex-col xl:flex-row gap-2">
+      <label className="relative flex-1"><Search className="absolute left-3 top-2.5 w-4 text-slate-400" /><input value={filters.search} onChange={event => setFilters(previous => ({ ...previous, search: event.target.value }))} placeholder="Search SKU, product name or shelf" className="w-full border p-2 pl-9 text-xs" /></label>
+      <select aria-label="Department filter" value={filters.department} onChange={event => setFilters(previous => ({ ...previous, department: event.target.value }))} className="border p-2 text-xs font-bold"><option value="ALL">All Departments</option>{departments.slice(1).map(value => <option key={value}>{value}</option>)}</select>
+      <select aria-label="Shelf filter" value={filters.shelf} onChange={event => setFilters(previous => ({ ...previous, shelf: event.target.value }))} className="border p-2 text-xs font-bold"><option value="ALL">All Assigned Shelves</option>{shelves.slice(1).map(value => <option key={value}>{value}</option>)}</select>
+      <select aria-label="BI check filter" value={filters.biCheck} onChange={event => setFilters(previous => ({ ...previous, biCheck: event.target.value }))} className="border p-2 text-xs font-bold"><option value="ALL">All BI Checks</option><option value="HIGH_VALUE_EXPOSURE">High Value Exposure</option></select>
+      <select aria-label="Count status filter" value={filters.countState} onChange={event => setFilters(previous => ({ ...previous, countState: event.target.value as StocktakeFilters['countState'] }))} className="border p-2 text-xs font-bold"><option value="ALL">Counted &amp; Uncounted</option><option value="COUNTED">Counted</option><option value="UNCOUNTED">Uncounted</option></select>
+      <button onClick={() => setFilters(previous => ({ ...previous, varianceOnly: !previous.varianceOnly }))} className={`border p-2 text-xs font-bold ${filters.varianceOnly ? 'bg-red-600 text-white' : ''}`}><Filter className="inline w-4 mr-1" />Variances Only</button>
+      <button onClick={resetCounts} disabled={!canPerform || isLocked} className="border p-2 text-xs font-bold disabled:opacity-40"><RotateCcw className="inline w-4 mr-1" />Reset</button>
+    </section>
 
-        <div className="p-2 pt-4 md:pt-2">
-          <div className="text-xs font-semibold text-slate-500">Shrinkage Valuation</div>
-          <div className="text-lg font-black text-red-600 mt-0.5">
-            -{currency}{summaryMetrics.totalShrinkageValue.toFixed(2)}
-          </div>
-          <div className="text-[11px] text-red-500 font-medium mt-0.5">Physical Loss / Theft</div>
-        </div>
+    <section className="bg-white border border-slate-300 overflow-hidden">
+      {isLoading ? <div className="p-16 text-center text-slate-600"><Loader2 className="w-7 animate-spin mx-auto mb-2" />Loading products assigned to Working Day {activeCycleDay}…</div>
+      : loadError ? <div className="p-16 text-center text-red-800"><AlertTriangle className="w-8 mx-auto mb-2" /><p className="font-black">Unable to load the assigned count list.</p></div>
+      : dayRows.length === 0 ? <div className="p-16 text-center"><Boxes className="w-8 mx-auto text-slate-300 mb-2" /><p className="font-black">No products are assigned to Working Day {activeCycleDay} for the selected location.</p></div>
+      : <div className="overflow-x-auto"><table className="min-w-[1700px] w-full text-xs text-left"><thead className="bg-[#1F242D] text-white"><tr>{['SKU', 'Product Name', 'Description', 'Category', 'Size', 'UM', 'Location', 'Shelf / Bin', 'System Qty', 'Physical Counted Qty', 'Variance', 'Valuation Impact', 'Count Status', 'Variance Audit Note'].map(header => <th key={header} className="p-3 whitespace-nowrap">{header}</th>)}</tr></thead><tbody>
+        {displayedRows.map(row => {
+          const hasCount = counts[row.productId] !== undefined;
+          const counted = counts[row.productId];
+          const variance = hasCount ? counted - row.systemQuantity : 0;
+          const rowStatus = hasCount ? 'COUNTED' : 'ASSIGNED';
+          return <tr key={row.assignmentId} className="border-t border-slate-200 hover:bg-slate-50">
+            <td className="p-3 font-mono font-black">{row.sku}</td><td className="p-3 font-black">{row.productName}</td><td className="p-3 max-w-52">{row.description || '—'}</td><td className="p-3">{row.category}</td><td className="p-3">{row.size || '—'}</td><td className="p-3">{row.unitOfMeasure}</td><td className="p-3">{row.locationName}</td><td className="p-3 font-bold">{[row.shelfCode, row.binCode].filter(Boolean).join(' / ')}</td>
+            <td className="p-3 text-center font-black">{visibleSystemQuantity ? row.systemQuantity : '•••'}</td>
+            <td className="p-3"><div className="flex justify-center items-center gap-1"><button disabled={!canPerform || isLocked || !hasCount} onClick={() => updateCount(row.productId, (counted || 0) - 1)} className="w-8 h-8 bg-slate-100 disabled:opacity-30"><Minus className="w-4 mx-auto" /></button><input aria-label={`Physical count for ${row.sku}`} disabled={!canPerform || isLocked} type="number" min="0" value={hasCount ? counted : ''} onChange={event => updateCount(row.productId, Number(event.target.value))} className="w-20 h-9 border text-center font-black text-base" /><button disabled={!canPerform || isLocked} onClick={() => updateCount(row.productId, (hasCount ? counted : 0) + 1)} className="w-8 h-8 bg-slate-100 disabled:opacity-30"><Plus className="w-4 mx-auto" /></button></div></td>
+            <td className={`p-3 text-center font-black ${variance < 0 ? 'text-red-600' : variance > 0 ? 'text-blue-600' : ''}`}>{hasCount ? (variance > 0 ? `+${variance}` : variance) : '—'}</td>
+            <td className="p-3 text-right font-bold">{canViewValuation && hasCount ? `${variance > 0 ? '+' : ''}${currency}${(variance * row.costPrice).toFixed(2)}` : 'Restricted'}</td>
+            <td className="p-3"><span className={`px-2 py-1 font-bold ${hasCount ? 'bg-blue-100 text-blue-800' : 'bg-slate-100'}`}>{rowStatus}</span></td>
+            <td className="p-3"><select aria-label={`Variance reason for ${row.sku}`} disabled={!hasCount || variance === 0 || isLocked} value={varianceReasons[row.productId] || ''} onChange={event => updateReason(row.productId, event.target.value)} className="w-full min-w-52 border p-2 disabled:bg-slate-100"><option value="">Select audit reason</option><option>Suspected Theft / Physical Shrinkage</option><option>Damaged / Expired Product</option><option>Misplaced / Wrong Shelf Location</option><option>Unrecorded Intake / Recount Match</option><option>System Data Entry Error</option></select></td>
+          </tr>;
+        })}
+        {!displayedRows.length && <tr><td colSpan={14} className="p-12 text-center font-bold text-slate-500">No assigned products match the active filters.</td></tr>}
+      </tbody></table></div>}
+    </section>
 
-        <div className="p-2 pt-4 md:pt-2">
-          <div className="text-xs font-semibold text-slate-500">Net Stock Adjustment</div>
-          <div className={`text-lg font-black mt-0.5 ${summaryMetrics.netVarianceValue >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-            {summaryMetrics.netVarianceValue >= 0 ? '+' : ''}{currency}{summaryMetrics.netVarianceValue.toFixed(2)}
-          </div>
-          <div className="text-[11px] text-slate-400 mt-0.5">Valuation impact</div>
-        </div>
-      </div>
+    {pendingDayChange && <div role="dialog" aria-modal="true" aria-label="Unsaved stocktake counts" className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"><div className="bg-white border-t-4 border-[#FF6600] shadow-2xl max-w-lg w-full p-5"><h2 className="font-black text-lg">Unsaved count changes</h2><p className="text-sm text-slate-600 mt-2">Working Day {activeCycleDay} has unsaved physical counts. Choose what to do before opening Working Day {pendingDayChange.day}.</p><div className="grid sm:grid-cols-3 gap-2 mt-5"><button onClick={saveDraftAndContinue} disabled={!canDraft} className="p-3 bg-[#FF6600] text-white font-black text-xs disabled:opacity-40">Save Draft and Continue</button><button onClick={discardAndContinue} className="p-3 border border-red-300 text-red-700 font-black text-xs">Discard Changes</button><button onClick={() => setPendingDayChange(null)} className="p-3 border font-black text-xs">Stay on Current Day</button></div></div></div>}
 
-      {/* Submission Success Alert */}
-      {submissionSuccess && (
-        <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs sm:text-sm text-emerald-900 flex items-start justify-between gap-3 shadow-xs">
-          <div className="flex items-start gap-3">
-            <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-            <div>
-              <strong className="block font-bold text-emerald-950">Approval Request Submitted!</strong>
-              <p className="mt-0.5 text-emerald-800">{submissionSuccess}</p>
-            </div>
-          </div>
-          <button
-            onClick={() => setSubmissionSuccess(null)}
-            className="text-emerald-700 hover:text-emerald-950 font-bold cursor-pointer"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
+    {showSubmitDialog && <div role="dialog" aria-modal="true" aria-label="Confirm stocktake submission" className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"><div className="bg-white border-t-4 border-[#FF6600] shadow-2xl max-w-xl w-full p-5"><h2 className="font-black text-lg">Submit for manager approval?</h2><dl className="grid grid-cols-2 gap-3 text-sm mt-4"><div><dt className="text-slate-500">Working Day</dt><dd className="font-black">{activeCycleDay}</dd></div><div><dt className="text-slate-500">Location</dt><dd className="font-black">{currentLocationName}</dd></div><div><dt className="text-slate-500">Assigned Shelves</dt><dd className="font-black">{assignedShelves.join(', ')}</dd></div><div><dt className="text-slate-500">Products</dt><dd className="font-black">{summary.productCount} assigned · {summary.countedCount} counted</dd></div><div><dt className="text-slate-500">Discrepancies</dt><dd className="font-black">{summary.discrepancyCount}</dd></div>{canViewValuation && <><div><dt className="text-slate-500">Positive valuation</dt><dd className="font-black text-blue-700">{currency}{summary.totalSurplusValue.toFixed(2)}</dd></div><div><dt className="text-slate-500">Shrinkage valuation</dt><dd className="font-black text-red-700">-{currency}{summary.totalShrinkageValue.toFixed(2)}</dd></div><div><dt className="text-slate-500">Net adjustment</dt><dd className="font-black">{currency}{summary.netVarianceValue.toFixed(2)}</dd></div></>}</dl><p className="mt-4 text-xs bg-amber-50 border border-amber-200 p-3">This creates one variance proposal. Inventory will not change until an authorised manager approves it.</p><div className="flex justify-end gap-2 mt-5"><button onClick={() => setShowSubmitDialog(false)} className="border px-4 py-2 font-bold">Cancel</button><button onClick={submitApproval} disabled={isSubmitting} className="bg-[#FF6600] text-white px-4 py-2 font-black disabled:opacity-40">{isSubmitting ? 'Submitting…' : 'Submit Once'}</button></div></div></div>}
 
-      {/* Filter and Count Form Controls */}
-      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-3">
-        <div className="flex flex-col md:flex-row items-center justify-between gap-3">
-          
-          <div className="relative flex-1 w-full">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Search product by SKU, name, or shelf..."
-              className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium focus:ring-2 focus:ring-[#FF6600] text-slate-900"
-            />
-          </div>
-
-          <div className="flex items-center gap-2 w-full md:w-auto overflow-x-auto pb-1 scrollbar-none">
-            {/* Department Filter Select */}
-            <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs font-bold shrink-0">
-              <Layers className="w-3.5 h-3.5 text-slate-400" />
-              <span className="text-slate-500">Dept:</span>
-              <select
-                value={selectedDepartmentFilter}
-                onChange={(e) => setSelectedDepartmentFilter(e.target.value)}
-                className="bg-transparent font-bold text-slate-900 focus:outline-none cursor-pointer"
-              >
-                {allDepartments.map(d => (
-                  <option key={d} value={d}>{d === 'ALL' ? 'All Departments' : d}</option>
-                ))}
-              </select>
-            </div>
-
-            {/* Shelf Filter Select */}
-            <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs font-bold shrink-0">
-              <Filter className="w-3.5 h-3.5 text-slate-400" />
-              <span className="text-slate-500">Shelf:</span>
-              <select
-                value={activeShelfFilter}
-                onChange={(e) => setActiveShelfFilter(e.target.value)}
-                className="bg-transparent font-bold text-slate-900 focus:outline-none cursor-pointer"
-              >
-                <option value="ALL">All Shelves ({allShelves.length})</option>
-                {allShelves.map(s => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </div>
-
-            {/* BI Anomaly Check Filter */}
-            <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs font-bold shrink-0">
-              <ShieldAlert className="w-3.5 h-3.5 text-red-500" />
-              <span className="text-slate-500">BI Check:</span>
-              <select
-                value={selectedBIFilter}
-                onChange={(e) => setSelectedBIFilter(e.target.value)}
-                className="bg-transparent font-bold text-slate-900 focus:outline-none cursor-pointer"
-              >
-                <option value="ALL">All Products</option>
-                <option value="NO_TRACEABLE_SALES">⚠️ Stocked - No POS Sales</option>
-                <option value="FAST_MOVING_MISMATCH">🚀 Fast Moving Velocity</option>
-                <option value="SUSPICIOUS_MOVEMENT">🔄 Suspicious Movements</option>
-                <option value="HIGH_VALUE_EXPOSURE">💎 High Value Exposure ($100+)</option>
-              </select>
-            </div>
-
-            {/* Discrepancies Only Toggle */}
-            <button
-              onClick={() => setShowDiscrepancyOnly(!showDiscrepancyOnly)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-colors cursor-pointer border ${
-                showDiscrepancyOnly
-                  ? 'bg-red-600 text-white border-red-600 shadow-xs'
-                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
-              }`}
-            >
-              Variances Only ({summaryMetrics.discrepancyCount})
-            </button>
-
-            {/* Reset Counts */}
-            <button
-              onClick={handleResetCounts}
-              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs flex items-center gap-1 transition-colors cursor-pointer shrink-0"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>Reset Counts</span>
-            </button>
-          </div>
-
-        </div>
-      </div>
-
-      {/* Stocktake Physical Count Form Table */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr className="bg-slate-900 text-slate-300 font-bold uppercase tracking-wider text-[10px] border-b border-slate-800">
-                <th className="py-3 px-4">SKU</th>
-                <th className="py-3 px-4">Product Name</th>
-                <th className="py-3 px-4">Description</th>
-                <th className="py-3 px-4">Category</th>
-                <th className="py-3 px-4">Size</th>
-                <th className="py-3 px-4">UM</th>
-                <th className="py-3 px-4">Location</th>
-                <th className="py-3 px-4">Shelf / Bin</th>
-                <th className="py-3 px-4 text-center">System Qty</th>
-                <th className="py-3 px-4 text-center min-w-[180px]">Physical Counted Qty</th>
-                <th className="py-3 px-4 text-center">Variance (Delta)</th>
-                <th className="py-3 px-4 text-right">Valuation Impact</th>
-                <th className="py-3 px-4 min-w-[200px]">Variance Audit Note</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 font-medium">
-              {displayedProducts.map((p) => {
-                const sysQty = currentStockMap[p.id] || 0;
-                const cntQty = countedQuantities[p.id] !== undefined ? countedQuantities[p.id] : sysQty;
-                const delta = cntQty - sysQty;
-                const view = buildProductLocationStockView(p, { id: selectedLocationId, name: currentLocationName }, sysQty);
-                const valuationImpact = delta * (p.costPrice || 0);
-
-                const isDiscrepancy = delta !== 0;
-                const isShrinkage = delta < 0;
-                const isSurplus = delta > 0;
-
-                return (
-                  <tr 
-                    key={p.id}
-                    className={`transition-colors ${
-                      isShrinkage 
-                        ? 'bg-red-50/40 hover:bg-red-50/70' 
-                        : isSurplus 
-                        ? 'bg-blue-50/40 hover:bg-blue-50/70' 
-                        : 'hover:bg-slate-50/80'
-                    }`}
-                  >
-                    <td className="py-3 px-4 font-mono font-bold">{view.sku}</td>
-                    <td className="py-3 px-4 font-bold">{view.productName}</td>
-                    <td className="py-3 px-4">{view.description || '—'}</td>
-                    <td className="py-3 px-4">{view.category}</td>
-                    <td className="py-3 px-4">{view.size || '—'}</td>
-                    <td className="py-3 px-4">{view.unitOfMeasure}</td>
-                    <td className="py-3 px-4">{view.locationName}</td>
-
-                    {/* Shelf */}
-                    <td className="py-3 px-4">
-                      <span className="bg-slate-100 text-slate-800 font-bold px-2 py-1 rounded-lg text-[11px]">
-                        {[view.shelfCode, view.binCode].filter(Boolean).join(' / ') || '—'}
-                      </span>
-                    </td>
-
-                    {/* System Qty */}
-                    <td className="py-3 px-4 text-center font-bold text-slate-700 text-sm">
-                      {view.systemQuantity} <span className="text-[10px] text-slate-400 font-normal">{view.unitOfMeasure}</span>
-                    </td>
-
-                    {/* Physical Counted Qty Input */}
-                    <td className="py-3 px-4 text-center">
-                      <div className="flex items-center justify-center gap-1 max-w-[160px] mx-auto">
-                        <button
-                          type="button"
-                          onClick={() => handleCountChange(p.id, cntQty - 1)}
-                          className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-black flex items-center justify-center cursor-pointer transition-colors"
-                        >
-                          <Minus className="w-3.5 h-3.5" />
-                        </button>
-
-                        <input
-                          type="number"
-                          min="0"
-                          value={cntQty}
-                          onChange={(e) => handleCountChange(p.id, parseInt(e.target.value) || 0)}
-                          className={`w-16 py-1 text-center font-extrabold text-sm border rounded-lg focus:ring-2 focus:ring-[#FF6600] ${
-                            isDiscrepancy 
-                              ? 'border-[#FF6600] bg-orange-50/30 text-slate-900' 
-                              : 'border-slate-200 bg-white text-slate-900'
-                          }`}
-                        />
-
-                        <button
-                          type="button"
-                          onClick={() => handleCountChange(p.id, cntQty + 1)}
-                          className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-black flex items-center justify-center cursor-pointer transition-colors"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </td>
-
-                    {/* Delta Variance */}
-                    <td className="py-3 px-4 text-center">
-                      <span className={`px-2.5 py-1 rounded-full text-xs font-black inline-flex items-center gap-1 ${
-                        isShrinkage 
-                          ? 'bg-red-100 text-red-700 border border-red-200' 
-                          : isSurplus 
-                          ? 'bg-blue-100 text-blue-700 border border-blue-200' 
-                          : 'bg-emerald-100 text-emerald-700 border border-emerald-200'
-                      }`}>
-                        {delta > 0 ? `+${delta}` : delta} {view.unitOfMeasure}
-                      </span>
-                    </td>
-
-                    {/* Valuation Impact */}
-                    <td className="py-3 px-4 text-right font-extrabold text-xs">
-                      <span className={valuationImpact < 0 ? 'text-red-600' : valuationImpact > 0 ? 'text-blue-600' : 'text-slate-400'}>
-                        {valuationImpact > 0 ? '+' : ''}{currency}{valuationImpact.toFixed(2)}
-                      </span>
-                    </td>
-
-                    {/* Reason Select */}
-                    <td className="py-3 px-4">
-                      {isDiscrepancy ? (
-                        <select
-                          value={varianceReasons[p.id] || ''}
-                          onChange={(e) => handleReasonChange(p.id, e.target.value)}
-                          className="w-full p-1.5 bg-white border border-red-200 rounded-lg text-xs font-medium text-slate-800 focus:ring-1 focus:ring-red-500"
-                        >
-                          <option value="">-- Select Audit Reason --</option>
-                          <option value="Suspected Theft / Physical Shrinkage">Suspected Theft / Physical Shrinkage</option>
-                          <option value="Damaged / Expired Product">Damaged / Expired Product</option>
-                          <option value="Misplaced / Wrong Shelf Location">Misplaced / Wrong Shelf Location</option>
-                          <option value="Unrecorded Intake / Recount Match">Unrecorded Intake / Recount Match</option>
-                          <option value="System Data Entry Error">System Data Entry Error</option>
-                        </select>
-                      ) : (
-                        <span className="text-[11px] text-emerald-600 font-bold flex items-center gap-1">
-                          <CheckCircle2 className="w-3.5 h-3.5" /> Physical Count Matches System
-                        </span>
-                      )}
-                    </td>
-
-                  </tr>
-                );
-              })}
-
-              {displayedProducts.length === 0 && (
-                <tr>
-                  <td colSpan={13} className="py-12 text-center text-slate-400">
-                    <Boxes className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                    <p className="font-bold text-slate-600">No products match your current stocktake filter criteria.</p>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Bottom Submission Action Bar */}
-        <div className="p-5 bg-slate-900 text-white flex flex-col sm:flex-row items-center justify-between gap-4 border-t border-slate-800">
-          <div className="text-xs text-slate-300">
-            Recorded Variances: <strong className="text-white text-sm">{summaryMetrics.discrepancyCount} SKUs</strong>
-            <span className="ml-2 text-slate-400">| Net Valuation:</span>{' '}
-            <strong className={summaryMetrics.netVarianceValue >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-              {currency}{summaryMetrics.netVarianceValue.toFixed(2)}
-            </strong>
-          </div>
-
-          <div className="flex items-center gap-3 w-full sm:w-auto">
-            <button
-              onClick={handleSubmitApproval}
-              disabled={isSubmitting || summaryMetrics.discrepancyCount === 0}
-              className="w-full sm:w-auto px-6 py-3 bg-[#FF6600] hover:bg-[#E65C00] disabled:opacity-50 text-white font-extrabold rounded-xl text-xs sm:text-sm shadow-lg flex items-center justify-center gap-2 transition-all cursor-pointer"
-            >
-              <Send className="w-4 h-4" />
-              <span>{isSubmitting ? 'Submitting to Approvals...' : 'Submit Stocktake for Manager Approval'}</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* BI Loss & Theft Immediate Count Modal */}
-      <BILossPreventionModal
-        isOpen={isBILossModalOpen}
-        onClose={() => setIsBILossModalOpen(false)}
-        products={products}
-        warehouseStock={warehouseStock}
-        branchStock={branchStock}
-        selectedLocationType={selectedLocationType}
-        selectedLocationId={selectedLocationId}
-        onLoadFlaggedItemsToForm={handleLoadFlaggedItemsToForm}
-      />
-
-    </div>
-  );
+    {showPrintDialog && <ExportOptionsDialog title="Print Count List" icon={<Printer className="w-5" />} exportScope={exportScope} setExportScope={setExportScope} blindCount={blindCount} setBlindCount={value => { setBlindCount(value); if (value) setShowSystemQuantity(false); }} showSystemQuantity={showSystemQuantity} setShowSystemQuantity={setShowSystemQuantity} canViewSystemQuantity={canViewSystemQuantity} includeNotes={includeNotes} setIncludeNotes={setIncludeNotes} includeRecount={includeRecount} setIncludeRecount={setIncludeRecount} isExporting={isExporting === 'PDF'} onClose={() => setShowPrintDialog(false)} actions={<><button onClick={() => runPdfExport('open')} className="bg-slate-900 text-white px-4 py-2 font-black text-xs">Print / Open PDF</button><button onClick={() => runPdfExport('download')} className="bg-[#FF6600] text-white px-4 py-2 font-black text-xs"><Download className="inline w-4 mr-1" />Download PDF</button></>} />}
+    {showExportDialog && <ExportOptionsDialog title="Export Spreadsheet" icon={<FileSpreadsheet className="w-5" />} exportScope={exportScope} setExportScope={setExportScope} blindCount={blindCount} setBlindCount={value => { setBlindCount(value); if (value) setShowSystemQuantity(false); }} showSystemQuantity={showSystemQuantity} setShowSystemQuantity={setShowSystemQuantity} canViewSystemQuantity={canViewSystemQuantity} includeNotes={includeNotes} setIncludeNotes={setIncludeNotes} includeRecount={includeRecount} setIncludeRecount={setIncludeRecount} isExporting={Boolean(isExporting)} onClose={() => setShowExportDialog(false)} actions={<><button onClick={() => runSpreadsheetExport('CSV')} className="border px-4 py-2 font-black text-xs">Export CSV</button><button onClick={() => runSpreadsheetExport('XLSX')} className="bg-[#FF6600] text-white px-4 py-2 font-black text-xs">Export XLSX</button></>} />}
+  </div>;
 };
+
+interface ExportOptionsDialogProps {
+  title: string; icon: React.ReactNode; exportScope: ExportScope; setExportScope: (value: ExportScope) => void;
+  blindCount: boolean; setBlindCount: (value: boolean) => void; showSystemQuantity: boolean; setShowSystemQuantity: (value: boolean) => void;
+  canViewSystemQuantity: boolean; includeNotes: boolean; setIncludeNotes: (value: boolean) => void; includeRecount: boolean; setIncludeRecount: (value: boolean) => void;
+  isExporting: boolean; onClose: () => void; actions: React.ReactNode;
+}
+
+const ExportOptionsDialog: React.FC<ExportOptionsDialogProps> = ({ title, icon, exportScope, setExportScope, blindCount, setBlindCount, showSystemQuantity, setShowSystemQuantity, canViewSystemQuantity, includeNotes, setIncludeNotes, includeRecount, setIncludeRecount, isExporting, onClose, actions }) => <div role="dialog" aria-modal="true" aria-label={title} className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"><div className="bg-white border-t-4 border-[#FF6600] shadow-2xl max-w-lg w-full p-5"><div className="flex justify-between"><h2 className="font-black text-lg flex gap-2">{icon}{title}</h2><button onClick={onClose}><X className="w-5" /></button></div><div className="space-y-3 mt-4 text-sm"><fieldset className="border p-3"><legend className="font-black px-1">Scope</legend><label className="block"><input type="radio" checked={exportScope === 'COMPLETE'} onChange={() => setExportScope('COMPLETE')} /> Complete Day List</label><label className="block mt-2"><input type="radio" checked={exportScope === 'FILTERED'} onChange={() => setExportScope('FILTERED')} /> Current Filtered View</label></fieldset><label className="flex gap-2"><input type="checkbox" checked={blindCount} onChange={event => setBlindCount(event.target.checked)} /> Blind Count</label>{canViewSystemQuantity && <label className="flex gap-2"><input type="checkbox" disabled={blindCount} checked={showSystemQuantity && !blindCount} onChange={event => setShowSystemQuantity(event.target.checked)} /> Show System Quantity</label>}<label className="flex gap-2"><input type="checkbox" checked={includeNotes} onChange={event => setIncludeNotes(event.target.checked)} /> Include Notes Column</label><label className="flex gap-2"><input type="checkbox" checked={includeRecount} onChange={event => setIncludeRecount(event.target.checked)} /> Include Recount Column</label><p className="text-xs text-slate-500">Cost and valuation are excluded. This is a worksheet and does not adjust inventory.</p></div><div className="flex flex-wrap justify-end gap-2 mt-5">{isExporting ? <span className="flex gap-2 text-sm"><Loader2 className="w-4 animate-spin" />Preparing {title.includes('Print') ? 'PDF' : 'spreadsheet'}…</span> : actions}</div></div></div>;
