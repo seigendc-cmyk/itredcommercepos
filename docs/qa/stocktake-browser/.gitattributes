@@ -1,0 +1,3 @@
+*.png -filter -diff -merge -text
+*.pdf -filter -diff -merge -text
+*.xlsx -filter -diff -merge -text

@@ -71,13 +71,13 @@ export function assertWarehouseToBranchRoute(
 export function searchTransferProducts(products: Product[], query: string): Product[] {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return [];
-  return products.filter(product =>
+  return products.filter(product => product.status !== 'archived' && (product.productType || 'INVENTORY') === 'INVENTORY' && (
     product.sku.toLowerCase().includes(normalized) ||
     product.name.toLowerCase().includes(normalized) ||
     Boolean(product.brand?.toLowerCase().includes(normalized)) ||
     Boolean(product.barcode?.toLowerCase().includes(normalized)) ||
-    Boolean(product.manufacturerCode?.toLowerCase().includes(normalized)),
-  );
+    Boolean(product.manufacturerCode?.toLowerCase().includes(normalized))
+  ));
 }
 
 function lineKey(line: TransferDraftLine): string {

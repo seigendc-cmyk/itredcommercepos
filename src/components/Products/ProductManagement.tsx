@@ -1,240 +1,72 @@
-import React, { useState } from 'react';
-import { Product, Warehouse, Branch, StaffMember } from '../../types';
+import React, { useMemo, useState } from 'react';
+import { Archive, ArrowDown, ArrowUp, ChevronDown, ClipboardCheck, Columns3, Download, Edit3, FileSpreadsheet, Filter, Package, Plus, RotateCcw, Search } from 'lucide-react';
+import { BIEventType } from '../../bi/types';
+import { ALL_PRODUCT_COLUMNS, DEFAULT_PRODUCT_COLUMNS, filterCatalogProducts, hasExtendedProductPermission, loadProductColumnPreference, normalizeProductColumns, ProductCatalogFilters, ProductColumnId, PRODUCT_SECTORS, ProductSortField, saveProductColumnPreference, searchCatalogProducts, sortCatalogProducts, TAX_OPTIONS } from '../../features/products';
+import { exportProductCsvTemplate, exportProductXlsxTemplate, ProductImportLocation, ProductTemplateOptions } from '../../features/product-import';
+import { ApprovalRequest, Branch, Product, StaffMember, Warehouse } from '../../types';
 import { StocktakeWorkspace } from '../Inventory/StocktakeWorkspace';
-import { Package, Plus, Search, Edit3, FileSpreadsheet, Boxes, ClipboardCheck } from 'lucide-react';
 
-interface ProductManagementProps {
-  products: Product[];
-  warehouseStock: Record<string, number>;
-  branchStock: Record<string, number>;
-  warehouses?: Warehouse[];
-  branches?: Branch[];
-  activeStaff?: StaffMember;
-  vendorId?: string;
-  onOpenAddProductModal: () => void;
-  onOpenImportModal?: () => void;
-  onEditProduct: (product: Product) => void;
-  onSubmitStocktakeApproval?: (payload: any) => Promise<void>;
-  onNavigateToApprovals?: () => void;
+interface Props {
+  products: Product[]; warehouseStock: Record<string, number>; branchStock: Record<string, number>; warehouses?: Warehouse[]; branches?: Branch[];
+  activeStaff?: StaffMember; vendorId?: string; businessName?: string; approvalRequests?: ApprovalRequest[];
+  onOpenAddProductModal: () => void; onOpenImportModal?: () => void; onEditProduct: (product: Product) => void;
+  onSubmitStocktakeApproval?: (payload: any) => Promise<void>; onNavigateToApprovals?: () => void; onStockLocationChange?: (type: 'warehouse' | 'branch', id: string) => Promise<void>;
+  onArchiveProduct?: (product: Product) => Promise<void>; onRestoreProduct?: (product: Product) => Promise<void>; onTemplateExport?: (format: 'CSV' | 'XLSX') => void;
+  onLogBIEvent?: (eventType: BIEventType, details: Record<string, unknown>) => Promise<unknown> | void;
 }
 
-export const ProductManagement: React.FC<ProductManagementProps> = ({
-  products,
-  warehouseStock,
-  branchStock,
-  warehouses = [],
-  branches = [],
-  activeStaff,
-  vendorId = '',
-  onOpenAddProductModal,
-  onOpenImportModal,
-  onEditProduct,
-  onSubmitStocktakeApproval,
-  onNavigateToApprovals
-}) => {
-  const [subTab, setSubTab] = useState<'catalog' | 'stocktake'>('catalog');
-  const [searchTerm, setSearchTerm] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState<string>('All');
+const COLUMN_LABELS: Record<ProductColumnId, string> = { sku: 'SKU', name: 'Product Name', description: 'Description', category: 'Category', productType: 'Product Type', sector: 'Industrial Sector', size: 'Size', costPrice: 'Supplier Cost', sellingPrice: 'Retail Price', quantity: 'Qty', unitOfMeasure: 'UM', location: 'Location', shelf: 'Shelf', bin: 'Bin', alternativeLookupCode: 'ALU', barcode: 'Barcode / EAN', hsCode: 'HS Code', taxOption: 'Tax Option', reorderLevel: 'Reorder Quantity', primarySupplier: 'Primary Supplier', status: 'Status', createdAt: 'Created Date', updatedAt: 'Updated Date' };
+const SORTABLE = new Set<ProductColumnId>(['sku', 'name', 'category', 'productType', 'sector', 'costPrice', 'sellingPrice', 'quantity', 'location', 'shelf', 'reorderLevel', 'hsCode', 'status']);
 
-  const categories = ['All', ...Array.from(new Set(products.map(p => p.category)))];
+export const ProductManagement: React.FC<Props> = ({ products, warehouseStock, branchStock, warehouses = [], branches = [], activeStaff, vendorId = '', businessName = 'iTred Commerce POS', approvalRequests = [], onOpenAddProductModal, onOpenImportModal, onEditProduct, onSubmitStocktakeApproval, onNavigateToApprovals, onStockLocationChange, onArchiveProduct, onRestoreProduct, onTemplateExport, onLogBIEvent }) => {
+  const [subTab, setSubTab] = useState<'catalog' | 'stocktake'>('catalog'); const [search, setSearch] = useState(''); const [advancedOpen, setAdvancedOpen] = useState(false); const [columnsOpen, setColumnsOpen] = useState(false); const [exportOpen, setExportOpen] = useState(false);
+  const firstLocation = warehouses[0] ? `warehouse:${warehouses[0].id}` : branches[0] ? `branch:${branches[0].id}` : ''; const [location, setLocation] = useState(firstLocation);
+  const [filters, setFilters] = useState<ProductCatalogFilters>({ status: 'active', productType: 'ALL', sector: 'ALL', taxOption: 'ALL', stockState: 'ALL' });
+  const [sort, setSort] = useState<{ field: ProductSortField; direction: 'asc' | 'desc' }>({ field: 'sku', direction: 'asc' });
+  const [visibleColumns, setVisibleColumns] = useState<ProductColumnId[]>(() => activeStaff ? loadProductColumnPreference(vendorId, activeStaff.id) : DEFAULT_PRODUCT_COLUMNS);
+  const [pendingColumns, setPendingColumns] = useState<ProductColumnId[]>(visibleColumns);
+  const [locationType, locationId] = location.split(':') as ['warehouse' | 'branch', string]; const selectedLocation = locationType === 'warehouse' ? warehouses.find(item => item.id === locationId) : branches.find(item => item.id === locationId); const stock = locationType === 'warehouse' ? warehouseStock : branchStock;
+  const locations: ProductImportLocation[] = [...warehouses.map(item => ({ id: item.id, code: item.code, name: item.name, type: 'warehouse' as const })), ...branches.map(item => ({ id: item.id, code: item.code, name: item.name, type: 'branch' as const }))];
+  const contexts = useMemo(() => products.map(product => ({ product, locationName: selectedLocation ? `${selectedLocation.code} · ${selectedLocation.name}` : '', shelfCode: product.shelfCode || product.shelf || '', binCode: product.binCode || product.bin || '', quantity: stock[product.id] ?? 0 })), [products, selectedLocation, stock]);
+  const searched = useMemo(() => searchCatalogProducts(contexts, search), [contexts, search]);
+  const rows = useMemo(() => sortCatalogProducts(filterCatalogProducts(searched, filters), sort.field, sort.direction).map(context => ({ ...context, matchType: searched.find(match => match.product.id === context.product.id)?.matchType || 'STRONG' })), [filters, searched, sort]);
+  const exportOptions: ProductTemplateOptions = { tenantId: vendorId, applicationVersion: import.meta.env?.VITE_APP_VERSION, categories: products.map(product => String(product.category || '')).filter((value, index, values) => Boolean(value) && values.indexOf(value) === index) as string[], locations };
 
-  const filteredProducts = products.filter(p => {
-    const matchesSearch = p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                          p.sku.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                          (p.barcode && p.barcode.includes(searchTerm));
-    const matchesCat = selectedCategory === 'All' || p.category === selectedCategory;
-    return matchesSearch && matchesCat;
-  });
+  if (subTab === 'stocktake' && activeStaff && onSubmitStocktakeApproval) return <div className="space-y-4"><button onClick={() => setSubTab('catalog')} className="font-bold text-[#FF6600]">← Product Catalog</button><StocktakeWorkspace products={products} warehouses={warehouses} branches={branches} warehouseStock={warehouseStock} branchStock={branchStock} activeStaff={activeStaff} vendorId={vendorId} businessName={businessName} approvalRequests={approvalRequests} onSubmitStocktakeApproval={onSubmitStocktakeApproval} onNavigateToApprovals={onNavigateToApprovals} onStockLocationChange={onStockLocationChange} onLogBIEvent={onLogBIEvent} /></div>;
 
-  return (
-    <div className="space-y-6">
-      
-      {/* Top Main Section Switcher Header */}
-      <div className="flex border-b border-slate-200 gap-3 font-bold text-xs sm:text-sm">
-        <button
-          onClick={() => setSubTab('catalog')}
-          className={`pb-3 px-4 flex items-center gap-2 border-b-2 transition-all cursor-pointer ${
-            subTab === 'catalog'
-              ? 'border-[#FF6600] text-[#FF6600]'
-              : 'border-transparent text-slate-500 hover:text-slate-900'
-          }`}
-        >
-          <Package className="w-4 h-4" />
-          <span>Master Product Catalog ({products.length})</span>
-        </button>
+  const changeLocation = async (value: string) => { setLocation(value); const [type, id] = value.split(':') as ['warehouse' | 'branch', string]; await onStockLocationChange?.(type, id); };
+  const changeSort = (field: ProductSortField) => { const next = { field, direction: sort.field === field && sort.direction === 'asc' ? 'desc' as const : 'asc' as const }; setSort(next); void onLogBIEvent?.('PRODUCT_SORT_CHANGED', { vendorId, actorId: activeStaff?.id, field, direction: next.direction, outcome: 'applied', timestamp: new Date().toISOString() }); };
+  const applyColumns = () => { if (!activeStaff) return; const saved = saveProductColumnPreference(vendorId, activeStaff.id, activeStaff.role, pendingColumns); setVisibleColumns(saved); setColumnsOpen(false); void onLogBIEvent?.('PRODUCT_COLUMN_PREFERENCE_UPDATED', { vendorId, actorId: activeStaff.id, columns: saved, outcome: 'updated', timestamp: new Date().toISOString() }); };
+  const logSearch = () => void onLogBIEvent?.('PRODUCT_SEARCH_PERFORMED', { vendorId, actorId: activeStaff?.id, queryTokenCount: search.trim().split(/\s+/).filter(Boolean).length, resultCount: rows.length, outcome: 'completed', timestamp: new Date().toISOString() });
 
-        <button
-          onClick={() => setSubTab('stocktake')}
-          className={`pb-3 px-4 flex items-center gap-2 border-b-2 transition-all cursor-pointer ${
-            subTab === 'stocktake'
-              ? 'border-[#FF6600] text-[#FF6600]'
-              : 'border-transparent text-slate-500 hover:text-slate-900'
-          }`}
-        >
-          <ClipboardCheck className="w-4 h-4" />
-          <span>Stocktake Audit & 26-Day Cycle Count</span>
-          <span className="bg-[#FF6600] text-white text-[10px] font-black px-2 py-0.5 rounded-full">
-            BI Guard
-          </span>
-        </button>
-      </div>
-
-      {subTab === 'stocktake' && activeStaff && onSubmitStocktakeApproval ? (
-        <StocktakeWorkspace
-          products={products}
-          warehouses={warehouses}
-          branches={branches}
-          warehouseStock={warehouseStock}
-          branchStock={branchStock}
-          activeStaff={activeStaff}
-          vendorId={vendorId}
-          onSubmitStocktakeApproval={onSubmitStocktakeApproval}
-          onNavigateToApprovals={onNavigateToApprovals}
-        />
-      ) : (
-        <>
-          {/* Top Banner */}
-          <div className="bg-white p-6 rounded-2xl border border-slate-200/90 shadow-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-2xl bg-[#1F242D] text-[#FF6600] flex items-center justify-center font-bold shadow-md">
-                <Package className="w-6 h-6" />
-              </div>
-              <div>
-                <h2 className="text-xl font-bold text-slate-900">Master Product Catalog</h2>
-                <p className="text-xs sm:text-sm text-slate-600 mt-0.5">
-                  Manage product items, barcodes, cost prices, retail prices, and reorder levels.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
-              <button
-                onClick={() => setSubTab('stocktake')}
-                className="flex-1 md:flex-initial px-4 py-2.5 bg-slate-900 hover:bg-black text-white font-bold rounded-xl text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer border border-transparent hover:border-[#FF6600]"
-              >
-                <ClipboardCheck className="w-4 h-4 text-[#FF6600]" />
-                <span>Perform Stocktake</span>
-              </button>
-
-              {onOpenImportModal && (
-                <button
-                  onClick={onOpenImportModal}
-                  className="flex-1 md:flex-initial px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-xl text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer"
-                >
-                  <FileSpreadsheet className="w-4 h-4 text-[#FF6600]" />
-                  <span>Import Catalog</span>
-                </button>
-              )}
-
-              <button
-                onClick={onOpenAddProductModal}
-                className="flex-1 md:flex-initial px-5 py-2.5 bg-[#FF6600] hover:bg-[#E65C00] text-white font-bold rounded-xl text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Add New Product</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Filter and Search Bar */}
-          <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs space-y-3">
-            <div className="flex flex-col sm:flex-row items-center gap-3">
-              <div className="relative flex-1 w-full">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="Search by SKU, product name, barcode..."
-                  className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 text-xs sm:text-sm font-medium focus:ring-2 focus:ring-[#FF6600]"
-                />
-              </div>
-
-              <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto pb-1 scrollbar-none">
-                {categories.map(cat => (
-                  <button
-                    key={cat}
-                    onClick={() => setSelectedCategory(cat)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap cursor-pointer transition-colors ${
-                      selectedCategory === cat
-                        ? 'bg-[#1F242D] text-white'
-                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                    }`}
-                  >
-                    {cat}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Products Table */}
-          <div className="bg-white rounded-2xl border border-slate-200/90 overflow-hidden shadow-xs">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs sm:text-sm">
-                <thead className="bg-[#1F242D] text-slate-200 font-bold uppercase text-[11px] tracking-wider">
-                  <tr>
-                    <th className="p-3.5">SKU / Barcode</th>
-                    <th className="p-3.5">Product Name</th>
-                    <th className="p-3.5">Category</th>
-                    <th className="p-3.5">Shelf Zone</th>
-                    <th className="p-3.5 text-right">Cost Price</th>
-                    <th className="p-3.5 text-right">Selling Price</th>
-                    <th className="p-3.5 text-center">Warehouse Stock</th>
-                    <th className="p-3.5 text-center">Branch Stock</th>
-                    <th className="p-3.5 text-center">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {filteredProducts.map((product, idx) => {
-                    const whQty = warehouseStock[product.id] || 0;
-                    const brQty = branchStock[product.id] || 0;
-                    const shelf = product.shelf || product.location || `Shelf #${(idx % 26) + 1}`;
-
-                    return (
-                      <tr key={product.id} className="hover:bg-slate-50">
-                        <td className="p-3.5">
-                          <p className="font-mono font-bold text-slate-900">{product.sku}</p>
-                          <p className="text-[10px] font-mono text-slate-500">{product.barcode}</p>
-                        </td>
-                        <td className="p-3.5 font-bold text-slate-900">{product.name}</td>
-                        <td className="p-3.5 text-slate-600">{product.category}</td>
-                        <td className="p-3.5 font-semibold text-slate-700">
-                          <span className="bg-slate-100 px-2 py-0.5 rounded text-xs font-mono">{shelf}</span>
-                        </td>
-                        <td className="p-3.5 text-right text-slate-600">${product.costPrice.toFixed(2)}</td>
-                        <td className="p-3.5 text-right font-black text-[#FF6600]">${product.sellingPrice.toFixed(2)}</td>
-                        <td className="p-3.5 text-center">
-                          <span className="px-2.5 py-1 bg-slate-100 text-slate-800 font-bold rounded-lg text-xs">
-                            {whQty} {product.unit}
-                          </span>
-                        </td>
-                        <td className="p-3.5 text-center">
-                          <span className={`px-2.5 py-1 font-bold rounded-lg text-xs ${
-                            brQty > 0 ? 'bg-orange-100 text-[#FF6600]' : 'bg-red-100 text-red-700'
-                          }`}>
-                            {brQty} {product.unit}
-                          </span>
-                        </td>
-                        <td className="p-3.5 text-center">
-                          <button
-                            onClick={() => onEditProduct(product)}
-                            className="p-1.5 text-slate-600 hover:text-[#FF6600] hover:bg-orange-50 rounded-lg transition-colors cursor-pointer"
-                            title="Edit Product"
-                          >
-                            <Edit3 className="w-4 h-4" />
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </>
-      )}
-
-    </div>
-  );
+  return <div className="space-y-5">
+    <section className="bg-white border border-slate-300 p-5 flex flex-col lg:flex-row justify-between gap-4"><div><h2 className="text-xl font-black flex gap-2"><Package className="text-[#FF6600]" />Master Product Catalog</h2><p className="text-sm text-slate-600">Canonical product masters with ranked search and location-scoped quantity.</p></div><div className="flex flex-wrap gap-2">
+      <button onClick={() => setSubTab('stocktake')} className="px-3 py-2 bg-slate-900 text-white font-bold flex gap-2"><ClipboardCheck className="w-4" />Stocktake</button>
+      <button onClick={onOpenImportModal} disabled={!activeStaff || !hasExtendedProductPermission(activeStaff.role, 'product.import')} className="px-3 py-2 bg-slate-800 text-white font-bold flex gap-2 disabled:opacity-40"><FileSpreadsheet className="w-4 text-[#FF6600]" />Import Products</button>
+      <div className="relative"><button onClick={() => setExportOpen(!exportOpen)} disabled={!activeStaff || !hasExtendedProductPermission(activeStaff.role, 'product.template.export')} className="px-3 py-2 border font-bold flex gap-2 disabled:opacity-40"><Download className="w-4" />Export Template</button>{exportOpen && <div className="absolute right-0 z-30 bg-white border shadow-lg min-w-40"><button onClick={() => { exportProductCsvTemplate(); onTemplateExport?.('CSV'); setExportOpen(false); }} className="block w-full text-left p-3">CSV template</button><button onClick={() => { void exportProductXlsxTemplate(exportOptions); onTemplateExport?.('XLSX'); setExportOpen(false); }} className="block w-full text-left p-3">XLSX template</button></div>}</div>
+      <button onClick={onOpenAddProductModal} disabled={!activeStaff || !hasExtendedProductPermission(activeStaff.role, 'product.create')} className="px-3 py-2 bg-[#FF6600] text-white font-black flex gap-2 disabled:opacity-40"><Plus className="w-4" />Add Product</button>
+    </div></section>
+    <section className="bg-white border border-slate-300 p-4 space-y-3"><div className="flex flex-col md:flex-row gap-2">
+      <label className="relative flex-1"><Search className="absolute left-3 top-3 w-4 text-slate-400" /><input value={search} onChange={event => setSearch(event.target.value)} onBlur={logSearch} onKeyDown={event => event.key === 'Enter' && logSearch()} placeholder="Search any product field in any word order" className="w-full border p-2.5 pl-9" /></label>
+      <select aria-label="Stock location" value={location} onChange={event => changeLocation(event.target.value)} className="border p-2.5 font-bold"><option value="">Select stock location</option>{locations.map(item => <option key={`${item.type}:${item.id}`} value={`${item.type}:${item.id}`}>{item.type === 'warehouse' ? 'Warehouse' : 'Branch'} · {item.code} · {item.name}</option>)}</select>
+      <button onClick={() => setAdvancedOpen(!advancedOpen)} className="border px-3 py-2 font-bold flex gap-2"><Filter className="w-4" />Advanced Search / Filters</button>
+      <div className="relative"><button onClick={() => { setPendingColumns(visibleColumns); setColumnsOpen(!columnsOpen); }} disabled={!activeStaff || !hasExtendedProductPermission(activeStaff.role, 'product.columns.configure')} className="border px-3 py-2 font-bold flex gap-2 disabled:opacity-40"><Columns3 className="w-4" />Product List Columns</button>{columnsOpen && <ColumnSelector selected={pendingColumns} setSelected={setPendingColumns} onApply={applyColumns} />}</div>
+    </div>{advancedOpen && <AdvancedFilters filters={filters} setFilters={setFilters} products={products} locations={locations.map(item => item.name)} />}</section>
+    <div className="hidden md:block bg-white border border-slate-300 overflow-x-auto"><table className="min-w-[1100px] w-full text-xs"><thead className="bg-[#1F242D] text-white sticky top-0"><tr>{visibleColumns.map(column => <th key={column} className={`p-3 text-left ${column === 'sku' ? 'sticky left-0 bg-[#1F242D]' : ''}`}><button disabled={!SORTABLE.has(column)} onClick={() => SORTABLE.has(column) && changeSort(column as ProductSortField)} className="flex gap-1 font-black disabled:cursor-default">{COLUMN_LABELS[column]}{sort.field === column && (sort.direction === 'asc' ? <ArrowUp className="w-3" /> : <ArrowDown className="w-3" />)}</button></th>)}<th className="p-3 sticky right-0 bg-[#1F242D]">Actions</th></tr></thead><tbody>{rows.map(row => <tr key={row.product.id} className="border-t"><>{visibleColumns.map(column => <ProductCell key={column} column={column} row={row} currency="$" />)}</><td className="p-3 sticky right-0 bg-white"><div className="flex gap-1"><button onClick={() => onEditProduct(row.product)} title="Edit Product" className="p-2"><Edit3 className="w-4" /></button>{row.product.status === 'archived' ? <button onClick={() => onRestoreProduct?.(row.product)} title="Restore Product" className="p-2 text-green-700"><RotateCcw className="w-4" /></button> : <button onClick={() => onArchiveProduct?.(row.product)} title="Delete or archive product" className="p-2 text-red-700"><Archive className="w-4" /></button>}</div></td></tr>)}</tbody></table>{!rows.length && <div className="p-12 text-center font-bold text-slate-500">No products match the search and filters.</div>}</div>
+    <div className="md:hidden space-y-3">{rows.map(row => <article key={row.product.id} className="bg-white border-l-4 border-[#FF6600] p-4"><div className="flex justify-between"><div><p className="font-mono text-xs">{row.product.sku}</p><h3 className="font-black">{row.product.name}</h3><p className="text-xs text-slate-500">{row.product.description}</p></div><button onClick={() => onEditProduct(row.product)}><Edit3 className="w-4" /></button></div><dl className="grid grid-cols-2 gap-2 text-xs mt-3"><div><dt className="text-slate-500">Qty / UM</dt><dd className="font-black">{row.quantity} {row.product.unitOfMeasure || row.product.unit}</dd></div><div><dt className="text-slate-500">Location</dt><dd>{row.locationName}<br /><span className="text-slate-500">{[row.shelfCode, row.binCode].filter(Boolean).join(' · ')}</span></dd></div><div><dt className="text-slate-500">Category / Sector</dt><dd>{row.product.category} · {row.product.sector}</dd></div><div><dt className="text-slate-500">Match</dt><dd>{row.matchType}</dd></div></dl></article>)}</div>
+  </div>;
 };
+
+const ProductCell = ({ column, row, currency }: { key?: React.Key; column: ProductColumnId; row: ReturnType<typeof searchCatalogProducts>[number] & { matchType?: string }; currency: string }) => {
+  const product = row.product; let value: React.ReactNode = '—';
+  if (column === 'sku') value = product.sku; else if (column === 'name') value = <div><strong>{product.name}</strong><div className="text-slate-500 max-w-60 truncate">{product.description || '—'}</div><span className="text-[9px] text-[#FF6600]">{row.matchType}</span></div>;
+  else if (column === 'description') value = product.description || '—'; else if (column === 'quantity') value = row.quantity; else if (column === 'location') value = <div>{row.locationName || 'Select location'}<div className="text-slate-500">{[row.shelfCode, row.binCode].filter(Boolean).join(' · ') || 'No shelf/bin'}</div></div>;
+  else if (column === 'shelf') value = row.shelfCode || '—'; else if (column === 'bin') value = row.binCode || '—'; else if (column === 'unitOfMeasure') value = product.unitOfMeasure || product.unit || '—';
+  else if (column === 'costPrice') value = `${currency}${product.costPrice.toFixed(2)}`; else if (column === 'sellingPrice') value = `${currency}${product.sellingPrice.toFixed(2)}`;
+  else if (column === 'primarySupplier') value = product.primarySupplierName || '—'; else value = String(product[column as keyof Product] || '—');
+  return <td className={`p-3 align-top ${column === 'sku' ? 'sticky left-0 bg-white font-mono font-black' : ''}`}>{value}</td>;
+};
+
+const ColumnSelector = ({ selected, setSelected, onApply }: { selected: ProductColumnId[]; setSelected: (columns: ProductColumnId[]) => void; onApply: () => void }) => <div className="absolute right-0 z-30 mt-1 bg-white border shadow-xl w-80 p-4"><div className="grid grid-cols-2 gap-2 max-h-72 overflow-y-auto">{ALL_PRODUCT_COLUMNS.map(column => <label key={column} className="text-xs flex gap-2"><input type="checkbox" checked={selected.includes(column)} onChange={event => setSelected(event.target.checked ? normalizeProductColumns([...selected, column]) : normalizeProductColumns(selected.filter(value => value !== column)))} />{COLUMN_LABELS[column]}</label>)}</div><div className="flex flex-wrap gap-2 mt-4"><button onClick={() => setSelected(ALL_PRODUCT_COLUMNS)} className="border px-2 py-1 text-xs font-bold">Select All</button><button onClick={() => setSelected(['sku', 'name'])} className="border px-2 py-1 text-xs font-bold">Clear Optional</button><button onClick={() => setSelected(DEFAULT_PRODUCT_COLUMNS)} className="border px-2 py-1 text-xs font-bold">Reset to Default</button><button onClick={onApply} className="bg-[#FF6600] text-white px-3 py-1 text-xs font-black">Apply</button></div></div>;
+
+const AdvancedFilters = ({ filters, setFilters, products, locations }: { filters: ProductCatalogFilters; setFilters: React.Dispatch<React.SetStateAction<ProductCatalogFilters>>; products: Product[]; locations: string[] }) => { const set = (key: keyof ProductCatalogFilters, value: any) => setFilters(previous => ({ ...previous, [key]: value })); const input = 'border p-2 text-xs'; return <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 border-t pt-3"><select aria-label="Product Type filter" value={filters.productType} onChange={e => set('productType', e.target.value)} className={input}><option value="ALL">All Product Types</option>{['INVENTORY', 'NON_INVENTORY', 'SERVICE', 'BOM', 'OTHER'].map(value => <option key={value}>{value}</option>)}</select><select aria-label="Sector filter" value={filters.sector} onChange={e => set('sector', e.target.value)} className={input}><option value="ALL">All Sectors</option>{PRODUCT_SECTORS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select><select aria-label="Category filter" value={filters.category || ''} onChange={e => set('category', e.target.value)} className={input}><option value="">All Categories</option>{Array.from(new Set(products.map(p => p.category))).map(value => <option key={value}>{value}</option>)}</select><select aria-label="Tax Option filter" value={filters.taxOption} onChange={e => set('taxOption', e.target.value)} className={input}><option value="ALL">All Tax Options</option>{TAX_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select><input aria-label="HS Code filter" placeholder="HS Code" value={filters.hsCode || ''} onChange={e => set('hsCode', e.target.value)} className={input} /><select aria-label="Location filter" value={filters.location || ''} onChange={e => set('location', e.target.value)} className={input}><option value="">All Locations</option>{locations.map(value => <option key={value}>{value}</option>)}</select><input aria-label="Shelf filter" placeholder="Shelf" value={filters.shelf || ''} onChange={e => set('shelf', e.target.value)} className={input} /><input aria-label="Bin filter" placeholder="Bin" value={filters.bin || ''} onChange={e => set('bin', e.target.value)} className={input} /><select aria-label="Status filter" value={filters.status} onChange={e => set('status', e.target.value)} className={input}><option value="ALL">All Statuses</option><option value="active">Active</option><option value="archived">Archived</option></select><select aria-label="Stock state filter" value={filters.stockState} onChange={e => set('stockState', e.target.value)} className={input}><option value="ALL">All Stock States</option><option value="IN_STOCK">In Stock</option><option value="OUT_OF_STOCK">Out of Stock</option><option value="REORDER">At Reorder</option></select><input aria-label="Supplier filter" placeholder="Supplier" value={filters.supplier || ''} onChange={e => set('supplier', e.target.value)} className={input} /><input aria-label="Minimum price" type="number" placeholder="Min price" onChange={e => set('minPrice', e.target.value ? Number(e.target.value) : undefined)} className={input} /><input aria-label="Maximum price" type="number" placeholder="Max price" onChange={e => set('maxPrice', e.target.value ? Number(e.target.value) : undefined)} className={input} /><input aria-label="Minimum cost" type="number" placeholder="Min cost" onChange={e => set('minCost', e.target.value ? Number(e.target.value) : undefined)} className={input} /><input aria-label="Maximum cost" type="number" placeholder="Max cost" onChange={e => set('maxCost', e.target.value ? Number(e.target.value) : undefined)} className={input} /></div>; };

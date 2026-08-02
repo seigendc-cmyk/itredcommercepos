@@ -7,11 +7,19 @@ import {
 } from '../types';
 import {
   completeApprovedRequestAtomically,
+  createIdempotentApprovalRequestId,
   createPendingInventoryRequest,
   decideInventoryRequest,
   InventoryWorkflowError,
   isSupplierReceiptAutoApproved,
 } from './inventoryApprovalWorkflow';
+
+test('approval idempotency IDs are stable per vendor and count scope', () => {
+  const first = createIdempotentApprovalRequestId('vendor-1', 'cycle-1:day-3:warehouse-1');
+  assert.equal(first, createIdempotentApprovalRequestId('vendor-1', 'cycle-1:day-3:warehouse-1'));
+  assert.notEqual(first, createIdempotentApprovalRequestId('vendor-1', 'cycle-1:day-4:warehouse-1'));
+  assert.notEqual(first, createIdempotentApprovalRequestId('vendor-2', 'cycle-1:day-3:warehouse-1'));
+});
 
 const now = '2026-07-26T12:00:00.000Z';
 const requester: WorkflowActor = {

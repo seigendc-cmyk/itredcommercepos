@@ -11,6 +11,7 @@ import {
   onSnapshot,
   runTransaction,
   writeBatch
+  ,deleteDoc
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import {
@@ -61,7 +62,8 @@ import {
   PurchaseOrder,
   PurchaseOrderItem,
   PurchaseOrderStatus,
-  Supplier
+  Supplier,
+  normalizeProduct
 } from '../types';
 import { logBIEvent } from '../bi/tracker';
 import {
@@ -79,6 +81,7 @@ import {
   DEFAULT_INVENTORY_APPROVAL_POLICY,
   INVENTORY_WORKFLOW_POLICIES,
   InventoryWorkflowError,
+  createIdempotentApprovalRequestId,
   isSupplierReceiptAutoApproved,
   markInventoryRequestCompleted,
   markInventoryRequestProcessing,
@@ -99,6 +102,8 @@ import {
   TransferDraftLine,
   validateTransferReceipt,
 } from './stockTransferWorkflow';
+import { assertProductPermission, determineProductRemoval, ProductUsageSummary } from './productLifecycle';
+import { assertCanonicalProductReference, assertDuplicateDecision, checkProductDuplicates, normalizeHsCode, ProductDuplicateDecisionInput, validateHsCode, assertExtendedProductPermission, effectiveProductTaxRate } from '../features/products';
 
 // Helper for local caching/fallback to ensure snappy preview & offline resiliency
 const LOCAL_STORAGE_KEY = 'itred_pos_vendor_data_';
@@ -664,17 +669,17 @@ export async function fetchProducts(vendorId: string): Promise<Product[]> {
     const colRef = collection(db, 'vendors', vendorId, 'products');
     const snap = await getDocs(colRef);
     if (!snap.empty) {
-      return snap.docs.map(d => d.data() as Product);
+      return snap.docs.map(d => normalizeProduct(d.data() as Product));
     }
   } catch (e) {
     console.warn(e);
   }
   const raw = localStorage.getItem(`${LOCAL_STORAGE_KEY}_products_${vendorId}`);
-  if (raw) return JSON.parse(raw);
+  if (raw) return (JSON.parse(raw) as Product[]).map(normalizeProduct);
   
   // Return default starter list
   const now = new Date().toISOString();
-  const initial = STARTER_PRODUCTS.map((p, idx) => ({
+  const initial = STARTER_PRODUCTS.map((p, idx) => normalizeProduct({
     ...p,
     id: `prod_default_${idx}`,
     vendorId,
@@ -684,24 +689,78 @@ export async function fetchProducts(vendorId: string): Promise<Product[]> {
   return initial;
 }
 
-// Save or Update Product
-export async function saveProduct(vendorId: string, product: Partial<Product>): Promise<Product> {
+export interface ProductSaveOptions {
+  actor: WorkflowActor;
+  vendorTaxRate: number;
+  duplicateDecision?: ProductDuplicateDecisionInput;
+}
+
+// Save or Update Product through canonical validation, permission and duplicate controls.
+export async function saveProduct(vendorId: string, product: Partial<Product>, options: ProductSaveOptions): Promise<Product> {
   const now = new Date().toISOString();
   const id = product.id || `prod_${Math.random().toString(36).substring(2, 9)}`;
-  const fullProduct: Product = {
+  assertExtendedProductPermission(options.actor.role, product.id ? 'product.update' : 'product.create');
+  if (!product.sku?.trim() || !product.name?.trim() || !product.category?.trim() || !(product.unitOfMeasure || product.unit)?.trim() || !product.productType) {
+    throw new Error('SKU, product name, category, unit of measure and product type are required.');
+  }
+  if (!product.sector) throw new Error('Industrial sector is required.');
+  const hsError = validateHsCode(product.hsCode || '');
+  if (hsError) throw new Error(hsError);
+  const current = await fetchProducts(vendorId);
+  const existing = current.find(item => item.id === id);
+  if ((product.hsCode || '') !== (existing?.hsCode || '')) assertExtendedProductPermission(options.actor.role, 'product.hs_code.edit');
+  if (existing && product.taxOption !== existing.taxOption) assertExtendedProductPermission(options.actor.role, 'product.tax.edit');
+  if (!existing && product.taxOption && product.taxOption !== 'STANDARD_RATED') assertExtendedProductPermission(options.actor.role, 'product.tax.edit');
+  const candidate: Partial<Product> = { ...existing, ...product, id, vendorId };
+  const duplicateMatches = checkProductDuplicates(candidate, current);
+  await logBIEvent(vendorId, 'PRODUCT_DUPLICATE_CHECKED', `Duplicate check completed for ${product.sku}`, { productId: id, outcome: duplicateMatches.length ? 'matches_found' : 'clear', duplicateConfidence: duplicateMatches[0]?.confidence || 0, reasonCodes: duplicateMatches.flatMap(match => match.reasons) }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+  if (duplicateMatches.length) {
+    await logBIEvent(vendorId, 'PRODUCT_DUPLICATE_DETECTED', `Possible duplicate detected for ${product.sku}`, { productId: id, existingProductIds: duplicateMatches.map(match => match.product.id), duplicateConfidence: duplicateMatches[0].confidence, reasonCodes: duplicateMatches.flatMap(match => match.reasons), outcome: 'review_required' }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+  }
+  assertDuplicateDecision(duplicateMatches, options.duplicateDecision, options.actor.role);
+  if (duplicateMatches.length && options.duplicateDecision) {
+    await logBIEvent(vendorId, 'PRODUCT_DUPLICATE_DECISION_RECORDED', `Duplicate decision recorded for ${product.sku}`, { productId: id, decision: options.duplicateDecision.decision, duplicateConfidence: duplicateMatches[0].confidence, outcome: 'confirmed_separate' }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+    await logBIEvent(vendorId, 'PRODUCT_DUPLICATE_OVERRIDE', `Possible duplicate override recorded for ${product.sku}`, { productId: id, decision: options.duplicateDecision.decision, reasonCode: 'AUTHORIZED_SEPARATE_PRODUCT', outcome: 'overridden' }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+  }
+  const taxOption = product.taxOption || existing?.taxOption || 'STANDARD_RATED';
+  const fullProduct: Product = normalizeProduct({
+    ...existing,
+    ...product,
     id,
     vendorId,
-    sku: product.sku || `SKU-${Math.floor(1000 + Math.random() * 9000)}`,
-    name: product.name || 'Untitled Product',
-    category: product.category || 'General',
+    sku: product.sku.trim(),
+    name: product.name.trim(),
+    category: product.category.trim(),
     description: product.description || '',
-    costPrice: Number(product.costPrice) || 0,
-    sellingPrice: Number(product.sellingPrice) || 0,
-    barcode: product.barcode || String(Math.floor(1000000000 + Math.random() * 9000000000)),
-    unit: product.unit || 'pcs',
-    reorderLevel: Number(product.reorderLevel) || 10,
+    size: product.size,
+    costPrice: Number(product.costPrice),
+    sellingPrice: Number(product.sellingPrice),
+    barcode: product.barcode,
+    alternativeLookupCode: product.alternativeLookupCode,
+    productType: product.productType,
+    sector: product.sector,
+    sectorAttributes: product.sectorAttributes || {},
+    hsCode: normalizeHsCode(product.hsCode || ''),
+    taxOption,
+    applicableTaxRate: effectiveProductTaxRate(taxOption, options.vendorTaxRate),
+    taxCode: product.taxCode,
+    taxCategory: product.taxCategory,
+    primarySupplierId: product.primarySupplierId,
+    primarySupplierName: product.primarySupplierName,
+    brand: product.brand,
+    manufacturer: product.manufacturer,
+    shelfCode: product.shelfCode || product.shelf,
+    shelf: product.shelfCode || product.shelf,
+    binCode: product.binCode || product.bin,
+    bin: product.binCode || product.bin,
+    location: product.location,
+    unitOfMeasure: (product.unitOfMeasure || product.unit)!.trim(),
+    unit: (product.unitOfMeasure || product.unit)!.trim(),
+    reorderLevel: Number(product.reorderLevel),
+    status: product.status || 'active',
     createdAt: product.createdAt || now,
-  };
+    updatedAt: now,
+  });
 
   try {
     await setDoc(doc(db, 'vendors', vendorId, 'products', id), fullProduct);
@@ -709,7 +768,6 @@ export async function saveProduct(vendorId: string, product: Partial<Product>): 
     console.warn(e);
   }
 
-  const current = await fetchProducts(vendorId);
   const idx = current.findIndex(p => p.id === id);
   let updated: Product[];
   if (idx >= 0) {
@@ -720,86 +778,73 @@ export async function saveProduct(vendorId: string, product: Partial<Product>): 
   }
   localStorage.setItem(`${LOCAL_STORAGE_KEY}_products_${vendorId}`, JSON.stringify(updated));
 
+  if ((existing?.taxOption || 'STANDARD_RATED') !== fullProduct.taxOption) {
+    await logBIEvent(vendorId, 'PRODUCT_TAX_OPTION_UPDATED', `Product tax classification updated for ${fullProduct.sku}`, { productId: id, taxOption: fullProduct.taxOption, applicableTaxRate: fullProduct.applicableTaxRate, outcome: 'updated' }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+  }
+  if ((existing?.hsCode || '') !== (fullProduct.hsCode || '')) {
+    await logBIEvent(vendorId, 'PRODUCT_HS_CODE_UPDATED', `Product HS classification updated for ${fullProduct.sku}`, { productId: id, hsCodePresent: Boolean(fullProduct.hsCode), outcome: 'updated' }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+  }
+
   return fullProduct;
 }
 
 // Bulk Import Products & Stock Adjustments
 export async function bulkImportProducts(
   vendorId: string,
-  warehouseId: string,
   newProducts: Partial<Product>[],
-  stockUpdates: { productId: string; addWarehouseQty: number }[]
+  options: ProductSaveOptions,
 ): Promise<{ createdProducts: Product[] }> {
   const now = new Date().toISOString();
   const createdProducts: Product[] = [];
-  const currentProducts = await fetchProducts(vendorId);
-  const updatedProductsList = [...currentProducts];
 
   for (const item of newProducts) {
     const id = item.id || `prod_${Math.random().toString(36).substring(2, 9)}`;
-    const fullProd: Product = {
-      id,
-      vendorId,
-      sku: item.sku || `SKU-${Math.floor(1000 + Math.random() * 9000)}`,
-      name: item.name || 'Imported Product',
-      category: item.category || 'General',
-      description: item.description || '',
-      costPrice: Number(item.costPrice) || 0,
-      sellingPrice: Number(item.sellingPrice) || 0,
-      barcode: item.barcode || String(Math.floor(1000000000 + Math.random() * 9000000000)),
-      unit: item.unit || 'pcs',
-      location: item.location || 'Central Warehouse',
-      shelf: item.shelf || 'Shelf 01',
-      reorderLevel: Number(item.reorderLevel) || 5,
-      createdAt: now,
-    };
-
-    try {
-      await setDoc(doc(db, 'vendors', vendorId, 'products', id), fullProd);
-    } catch (e) {
-      console.warn('Firestore bulk import save warning:', e);
-    }
-
+    const fullProd = await saveProduct(vendorId, { ...item, id, createdAt: now }, options);
     createdProducts.push(fullProd);
-    updatedProductsList.unshift(fullProd);
-
-    // If stockUpdate uses temporary SKU/id mapping, match it
-    const matchingStock = stockUpdates.find(s => s.productId === item.sku || s.productId === item.id);
-    if (matchingStock) {
-      matchingStock.productId = id; // replace with real generated product ID
-    }
-  }
-
-  localStorage.setItem(`${LOCAL_STORAGE_KEY}_products_${vendorId}`, JSON.stringify(updatedProductsList));
-
-  // Update Warehouse Inventory Stock
-  if (stockUpdates.length > 0 && warehouseId) {
-    const currentWhStock = await fetchWarehouseStock(vendorId, warehouseId);
-    for (const update of stockUpdates) {
-      if (update.addWarehouseQty > 0) {
-        const prev = currentWhStock[update.productId] || 0;
-        currentWhStock[update.productId] = prev + update.addWarehouseQty;
-
-        const invId = `${vendorId}_${warehouseId}_${update.productId}`;
-        const invData: WarehouseInventory = {
-          id: invId,
-          vendorId,
-          warehouseId,
-          productId: update.productId,
-          quantity: currentWhStock[update.productId],
-          lastUpdated: now,
-        };
-        try {
-          await setDoc(doc(db, 'vendors', vendorId, 'warehouse_inventory', invId), invData);
-        } catch (e) {
-          console.warn('Firestore inventory stock update warning:', e);
-        }
-      }
-    }
-    localStorage.setItem(`${LOCAL_STORAGE_KEY}_wh_stock_${vendorId}_${warehouseId}`, JSON.stringify(currentWhStock));
   }
 
   return { createdProducts };
+}
+
+export async function inspectProductUsage(vendorId: string, productId: string): Promise<ProductUsageSummary> {
+  const stockByLocation: ProductUsageSummary['stockByLocation'] = [];
+  const references: string[] = [];
+  const collections = ['warehouse_inventory', 'branch_inventory', 'inventory_movements', 'orders', 'purchase_orders', 'supplier_receipts', 'transfers', 'adjustments', 'approval_requests'];
+  await Promise.all(collections.map(async collectionName => {
+    const snapshot = await getDocs(collection(db, 'vendors', vendorId, collectionName));
+    snapshot.docs.forEach(entry => {
+      const value = entry.data() as Record<string, unknown>;
+      if (!JSON.stringify(value).includes(productId)) return;
+      if (collectionName.endsWith('_inventory')) {
+        const quantity = Number(value.quantity || 0);
+        stockByLocation.push({ locationId: String(value.warehouseId || value.branchId || ''), locationName: String(value.warehouseId || value.branchId || ''), quantity });
+      } else references.push(collectionName);
+    });
+  }));
+  return { stockByLocation, references: [...new Set(references)] };
+}
+
+export async function archiveOrDeleteProduct(vendorId: string, product: Product, actor: WorkflowActor): Promise<'delete' | 'archive'> {
+  const usage = await inspectProductUsage(vendorId, product.id);
+  const outcome = determineProductRemoval(product, usage);
+  assertProductPermission(actor.role, outcome === 'delete' ? 'product.delete' : 'product.archive');
+  if (outcome === 'delete') {
+    await deleteDoc(doc(db, 'vendors', vendorId, 'products', product.id));
+  } else {
+    await setDoc(doc(db, 'vendors', vendorId, 'products', product.id), { status: 'archived', updatedAt: new Date().toISOString() }, { merge: true });
+  }
+  const products = (await fetchProducts(vendorId)).filter(item => outcome !== 'delete' || item.id !== product.id).map(item => item.id === product.id ? { ...item, status: 'archived' as const } : item);
+  localStorage.setItem(`${LOCAL_STORAGE_KEY}_products_${vendorId}`, JSON.stringify(products));
+  await logBIEvent(vendorId, outcome === 'delete' ? 'PRODUCT_DELETED' : 'PRODUCT_ARCHIVED', `${outcome} product ${product.sku}`, { productId: product.id, sku: product.sku, outcome }, { staffId: actor.id, staffName: actor.name, staffRole: actor.role });
+  return outcome;
+}
+
+export async function restoreProduct(vendorId: string, product: Product, actor: WorkflowActor): Promise<void> {
+  assertProductPermission(actor.role, 'product.restore');
+  await setDoc(doc(db, 'vendors', vendorId, 'products', product.id), { status: 'active', updatedAt: new Date().toISOString() }, { merge: true });
+  const products = (await fetchProducts(vendorId)).map(item => item.id === product.id ? { ...item, status: 'active' as const } : item);
+  localStorage.setItem(`${LOCAL_STORAGE_KEY}_products_${vendorId}`, JSON.stringify(products));
+  await logBIEvent(vendorId, 'PRODUCT_RESTORED', `restored product ${product.sku}`, { productId: product.id, sku: product.sku, outcome: 'restored' }, { staffId: actor.id, staffName: actor.name, staffRole: actor.role });
 }
 
 // Warehouse Inventory Fetch
@@ -1455,6 +1500,13 @@ export async function adjustBranchStock(
   requester: WorkflowActor,
 ): Promise<ApprovalRequest | StockAdjustment> {
   await requireActiveOperationalResource(vendorId, 'branch', branchId);
+  const productIndex = new Map((await fetchProducts(vendorId)).map(product => [product.id, product]));
+  items.forEach(item => {
+    const product = productIndex.get(item.productId);
+    if (!product || product.status === 'archived' || (product.productType || 'INVENTORY') !== 'INVENTORY') {
+      throw new Error(`${item.productName} is not an active inventory product and cannot be adjusted.`);
+    }
+  });
   if (type === 'opening_balance' || type === 'recount') {
     const adjustmentId = `adj_${Math.random().toString(36).substring(2, 9)}`;
     return createApprovalRequest(vendorId, {
@@ -1842,6 +1894,7 @@ function approvalTypeForEntity(entityType: CriticalInventoryEntityType): Approva
 export interface InventoryApprovalSubmission {
   entityType: CriticalInventoryEntityType;
   entityId: string;
+  idempotencyKey?: string;
   title: string;
   description: string;
   requester: WorkflowActor;
@@ -1997,7 +2050,14 @@ export async function createApprovalRequest(
 ): Promise<ApprovalRequest> {
   const now = new Date().toISOString();
   const policy = await fetchInventoryApprovalPolicy(vendorId);
-  const id = `appr_${crypto.randomUUID()}`;
+  if (submission.dataPayload.items?.length) {
+    const canonicalProducts = await fetchProducts(vendorId);
+    submission.dataPayload.items.forEach(item => assertCanonicalProductReference(canonicalProducts, item.productId));
+  }
+  const idempotencyKey = submission.idempotencyKey?.trim();
+  const id = idempotencyKey
+    ? createIdempotentApprovalRequestId(vendorId, idempotencyKey)
+    : `appr_${crypto.randomUUID()}`;
   const request = createPendingInventoryRequest({
     id,
     tenantId: vendorId,
@@ -2020,7 +2080,17 @@ export async function createApprovalRequest(
     notificationAudienceRoles: INVENTORY_WORKFLOW_POLICIES[submission.entityType].approveRoles,
   }, now);
 
-  await runTransaction(db, async transaction => {
+  const persisted = await runTransaction(db, async transaction => {
+    if (idempotencyKey) {
+      const existingSnapshot = await transaction.get(doc(db, 'vendors', vendorId, 'approval_requests', id));
+      if (existingSnapshot.exists()) {
+        const existing = normalizeStoredApproval(vendorId, existingSnapshot.id, existingSnapshot.data());
+        if (existing.entityType !== submission.entityType || existing.entityId !== submission.entityId) {
+          throw new Error('The approval idempotency key is already assigned to a different request.');
+        }
+        return { request: existing, created: false };
+      }
+    }
     transaction.set(doc(db, 'vendors', vendorId, 'approval_requests', id), request);
     for (const [index, status] of (['DRAFT', 'SUBMITTED', 'PENDING_APPROVAL'] as InventoryWorkflowStatus[]).entries()) {
       const event = auditEventDocument(
@@ -2032,7 +2102,10 @@ export async function createApprovalRequest(
       );
       transaction.set(doc(db, 'vendors', vendorId, 'approval_events', event.id), event);
     }
+    return { request, created: true };
   });
+
+  if (!persisted.created) return persisted.request;
 
   await logWorkflowTransitions(
     request,
@@ -2040,7 +2113,7 @@ export async function createApprovalRequest(
     submission.requester,
     'Inventory transaction submitted for approval.',
   );
-  return request;
+  return persisted.request;
 }
 
 function requirePayloadItems(payload: ApprovalDataPayload) {
@@ -2524,6 +2597,31 @@ export async function reviewApprovalRequest(
         ...quantity,
         createdAt: now,
       });
+    });
+    const atomicBiId = `bi_${requestId}_${completed.version}_COMPLETED`;
+    transaction.set(doc(db, 'vendors', vendorId, 'bi_logs', atomicBiId), {
+      id: atomicBiId,
+      vendorId,
+      eventType: 'INVENTORY_WORKFLOW_TRANSITION',
+      actionSummary: `${current.entityType.replaceAll('_', ' ')} completed atomically`,
+      staffId: reviewer.id,
+      staffName: reviewer.name,
+      staffRole: reviewer.role,
+      branchId: current.branchId || null,
+      branchName: current.branchName || null,
+      details: {
+        tenantId: vendorId,
+        entityType: current.entityType,
+        entityId: current.entityId,
+        requestId,
+        status: 'COMPLETED',
+        outcome: 'COMPLETED',
+        version: completed.version,
+        quantityDecisions,
+      },
+      riskScore: current.entityType === 'STOCKTAKE_ADJUSTMENT' ? 75 : 40,
+      isAnomaly: current.entityType === 'STOCKTAKE_ADJUSTMENT',
+      timestamp: now,
     });
     return completed;
     });

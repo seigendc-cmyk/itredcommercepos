@@ -39,7 +39,10 @@ import {
   fetchApprovalRequests,
   createApprovalRequest,
   reviewApprovalRequest,
-  bulkImportProducts,
+  saveProduct,
+  archiveOrDeleteProduct,
+  inspectProductUsage,
+  restoreProduct,
   fetchDeliveryCouriers,
   createDeliveryDispatch,
   updateVendorProfile,
@@ -79,6 +82,7 @@ import { CustomerManagement, CustomerSaveInput } from './components/Customers/Cu
 
 // New Architecture Components
 import { StaffDesk } from './components/Staff/StaffDesk';
+import { StockActionDesk } from './components/Staff/StockActionDesk';
 import { StaffManagement } from './components/Staff/StaffManagement';
 import { ApprovalsWorkspace } from './components/Approvals/ApprovalsWorkspace';
 import { BIAuditDashboard } from './components/BI/BIAuditDashboard';
@@ -108,6 +112,8 @@ import { DeliveryFleetManagement } from './components/Delivery/DeliveryFleetMana
 import { PlanUpgradeModal } from './components/Delivery/PlanUpgradeModal';
 import { DeliveryDispatchModal } from './components/Delivery/DeliveryDispatchModal';
 import { DeliveryCourier, SubscriptionPlanType } from './types';
+import { buildOpeningBalanceRequest, CanonicalProductImportRow, ProductImportBatch, toProductMaster } from './features/product-import';
+import { assertStocktakePermission } from './features/stocktake';
 
 export default function App() {
   // Auth State
@@ -453,6 +459,7 @@ export default function App() {
   const handleSubmitStocktakeApproval = async (payload: {
     title: string;
     description: string;
+    idempotencyKey: string;
     dataPayload: {
       locationType: 'warehouse' | 'branch';
       locationId: string;
@@ -468,9 +475,11 @@ export default function App() {
     };
   }) => {
     if (!vendor || !activeStaff) return;
+    assertStocktakePermission(activeStaff.role, 'stocktake.submit');
     await createApprovalRequest(vendor.id, {
       entityType: 'STOCKTAKE_ADJUSTMENT',
-      entityId: `adj_${crypto.randomUUID()}`,
+      entityId: `stocktake_${payload.idempotencyKey.replace(/[^a-z0-9_-]+/gi, '_')}`,
+      idempotencyKey: payload.idempotencyKey,
       title: payload.title,
       description: payload.description,
       requester: { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role },
@@ -683,24 +692,27 @@ export default function App() {
   };
 
   // Product Bulk Import Handler
-  const handleConfirmImport = async (
-    newProducts: Partial<Product>[],
-    stockUpdates: { productId: string; addWarehouseQty: number }[],
-    importSummary: { totalImported: number; totalMerged: number; sector: string }
-  ) => {
-    if (!vendor) return;
+  const handleConfirmImport = async (batch: ProductImportBatch, rows: CanonicalProductImportRow[]) => {
+    if (!vendor || !activeStaff) return;
     try {
-      const defaultWh = warehouses[0];
-      await bulkImportProducts(vendor.id, defaultWh?.id || '', newProducts, stockUpdates);
-      await logBIEvent(
-        vendor.id,
-        'PRODUCT_BULK_IMPORT',
-        `Imported ${importSummary.totalImported} products & merged ${importSummary.totalMerged} items mapped to sector ${importSummary.sector}`,
-        { totalImported: importSummary.totalImported, totalMerged: importSummary.totalMerged, sector: importSummary.sector },
-        activeStaff ? { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role } : undefined
-      );
+      await logBIEvent(vendor.id, 'PRODUCT_IMPORT_STARTED', `Product import ${batch.batchId} started`, { batchId: batch.batchId, outcome: 'started' }, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role });
+      for (const row of rows) {
+        const existing = row.duplicateProduct;
+        if (row.decision === 'USE_EXISTING' && !existing) throw new Error(`Import row ${row.rowNumber} has no existing product mapping.`);
+        const product = row.decision === 'USE_EXISTING'
+          ? existing!
+          : await saveProduct(vendor.id, { ...toProductMaster(row), id: row.decision === 'UPDATE_EXISTING' ? existing?.id : undefined, createdAt: existing?.createdAt }, { actor: { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role }, vendorTaxRate: vendor.taxRate, duplicateDecision: row.decision === 'CONTINUE_SEPARATE' ? { decision: 'CONTINUE_SEPARATE', reason: row.duplicateReason, actorId: activeStaff.id } : undefined });
+        await logBIEvent(vendor.id, row.decision === 'USE_EXISTING' ? 'PRODUCT_DUPLICATE_DECISION_RECORDED' : existing ? 'PRODUCT_UPDATED' : 'PRODUCT_CREATED', `${row.decision === 'USE_EXISTING' ? 'Mapped to' : existing ? 'Updated' : 'Created'} ${product.sku}`, { batchId: batch.batchId, productId: product.id, decision: row.decision, outcome: 'completed' }, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role });
+        if ((row.quantity || 0) > 0) {
+          const location = [...warehouses.map(item => ({ ...item, type: 'warehouse' as const })), ...branches.map(item => ({ ...item, type: 'branch' as const }))].find(item => item.code.toLowerCase() === row.locationCode.toLowerCase());
+          if (!location) throw new Error(`Location ${row.locationCode} is no longer available.`);
+          await createApprovalRequest(vendor.id, buildOpeningBalanceRequest(batch, row, product, location, { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role }));
+          await logBIEvent(vendor.id, 'OPENING_BALANCE_REQUEST_CREATED', `Opening balance requested for ${product.sku}`, { batchId: batch.batchId, productId: product.id, stockLocationId: location.id, outcome: 'pending_approval' }, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role });
+        }
+      }
+      await logBIEvent(vendor.id, 'PRODUCT_IMPORT_COMPLETED', `Product import ${batch.batchId} completed`, { batchId: batch.batchId, outcome: 'completed', rowCount: rows.length }, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role });
       await refreshAllData();
-      alert(`Import Successful! Added ${importSummary.totalImported} new products and merged stock for ${importSummary.totalMerged} items.`);
+      alert(`Import completed. ${rows.length} product master row(s) saved; opening quantities are pending approval.`);
     } catch (e) {
       console.error('Error during catalog import:', e);
       alert('Failed to complete catalog import.');
@@ -847,13 +859,13 @@ export default function App() {
         
         {/* Desk View */}
         {activeTab === 'desk' && (
-          <StaffDesk
+          <><StockActionDesk vendorId={vendor.id} staff={activeStaff} products={products} warehouses={warehouses} branches={branches} warehouseStock={warehouseStock} branchStock={branchStock} onNavigate={(tab) => setActiveTab(tab as AppMenuId)} onLogBIEvent={(eventType, details) => logBIEvent(vendor.id, eventType, eventType.replaceAll('_', ' ').toLowerCase(), details, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role })} /><StaffDesk
             staff={activeStaff}
             activeBranch={activeBranch}
             activeTerminal={activeTerminal}
             pendingApprovalsCount={pendingApprovalsCount}
             onNavigate={(tab) => setActiveTab(tab)}
-          />
+          /></>
         )}
 
         {activeTab === 'customers' && activeStaff.grantedMenuIds.includes('customers') && (
@@ -873,7 +885,7 @@ export default function App() {
         {/* POS Register */}
         {activeTab === 'pos' && (!activeStaff.grantedMenuIds || activeStaff.grantedMenuIds.length === 0 || activeStaff.grantedMenuIds.includes('pos')) && (
           <POSTerminal
-            products={products}
+            products={products.filter(product => product.status !== 'archived')}
             branchStock={branchStock}
             vendor={vendor}
             activeBranch={activeBranch}
@@ -897,7 +909,7 @@ export default function App() {
         {activeTab === 'warehouse' && activeStaff.grantedMenuIds.includes('warehouse') && (
           <WarehouseManagement
             warehouses={warehouses}
-            products={products}
+            products={products.filter(product => product.status !== 'archived')}
             warehouseStock={warehouseStock}
             supplierReceipts={supplierReceipts}
             transfers={transfers}
@@ -915,7 +927,7 @@ export default function App() {
         {activeTab === 'transfers' && activeStaff.grantedMenuIds.includes('transfers') && (
           <WarehouseManagement
             warehouses={warehouses}
-            products={products}
+            products={products.filter(product => product.status !== 'archived')}
             warehouseStock={warehouseStock}
             supplierReceipts={supplierReceipts}
             transfers={transfers}
@@ -934,7 +946,7 @@ export default function App() {
           <BranchManagement
             branches={branches}
             terminals={terminals}
-            products={products}
+            products={products.filter(product => product.status !== 'archived')}
             branchStock={branchStock}
             stockAdjustments={stockAdjustments}
             activeBranch={activeBranch}
@@ -954,6 +966,8 @@ export default function App() {
             branches={branches}
             activeStaff={activeStaff}
             vendorId={vendor.id}
+            businessName={vendor.businessName}
+            approvalRequests={approvalRequests}
             onOpenAddProductModal={() => {
               setProductToEdit(null);
               setIsProductModalOpen(true);
@@ -963,8 +977,23 @@ export default function App() {
               setProductToEdit(p);
               setIsProductModalOpen(true);
             }}
+            onStockLocationChange={async (type, id) => {
+              if (type === 'warehouse') setWarehouseStock(await fetchWarehouseStock(vendor.id, id));
+              else setBranchStock(await fetchBranchStock(vendor.id, id));
+            }}
+            onArchiveProduct={async product => {
+              if (!activeStaff) return;
+              const usage = await inspectProductUsage(vendor.id, product.id);
+              const stock = usage.stockByLocation.map(item => `${item.locationName}: ${item.quantity}`).join('\n') || 'No stock';
+              const outcome = usage.stockByLocation.some(item => item.quantity !== 0) || usage.references.length ? 'Archive' : 'Delete';
+              if (!confirm(`${outcome} ${product.sku} · ${product.name}?\n\nStock by location:\n${stock}\n\nHistory: ${usage.references.join(', ') || 'None'}`)) return;
+              await archiveOrDeleteProduct(vendor.id, product, { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role }); await refreshAllData();
+            }}
+            onRestoreProduct={async product => { if (!activeStaff || !confirm(`Restore ${product.sku} · ${product.name}?`)) return; await restoreProduct(vendor.id, product, { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role }); await refreshAllData(); }}
+            onTemplateExport={format => logBIEvent(vendor.id, 'PRODUCT_IMPORT_TEMPLATE_EXPORTED', `Product import ${format} template exported`, { outcome: 'completed', format }, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role })}
             onSubmitStocktakeApproval={handleSubmitStocktakeApproval}
             onNavigateToApprovals={() => setActiveTab('approvals')}
+            onLogBIEvent={(eventType, details) => logBIEvent(vendor.id, eventType, eventType.replaceAll('_', ' ').toLowerCase(), details, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role })}
           />
         )}
 
@@ -1067,7 +1096,7 @@ export default function App() {
         onClose={() => setIsSupplierModalOpen(false)}
         vendorId={vendor.id}
         warehouses={warehouses}
-        products={products}
+        products={products.filter(product => product.status !== 'archived')}
         warehouseStock={warehouseStock}
         activeStaff={activeStaff}
         onSuccess={refreshAllData}
@@ -1086,7 +1115,7 @@ export default function App() {
         vendorId={vendor.id}
         warehouses={warehouses}
         branches={branches}
-        products={products}
+        products={products.filter(product => product.status !== 'archived')}
         warehouseStock={warehouseStock}
         activeStaff={activeStaff}
         onSuccess={refreshAllData}
@@ -1098,7 +1127,7 @@ export default function App() {
         vendorId={vendor.id}
         branches={branches}
         activeBranchId={activeBranch?.id}
-        products={products}
+        products={products.filter(product => product.status !== 'archived')}
         branchStock={branchStock}
         activeStaff={activeStaff}
         onSuccess={refreshAllData}
@@ -1116,8 +1145,29 @@ export default function App() {
         isOpen={isProductModalOpen}
         onClose={() => setIsProductModalOpen(false)}
         vendorId={vendor.id}
+        vendorTaxRate={vendor.taxRate}
+        vendorDefaultSector={vendor.businessSector}
         productToEdit={productToEdit}
+        products={products}
+        warehouses={warehouses}
+        branches={branches}
+        activeStaff={activeStaff}
+        warehouseStock={warehouseStock}
+        branchStock={branchStock}
         onSuccess={refreshAllData}
+        onUseExistingProduct={product => setProductToEdit(product)}
+        onOpenStockAdjustment={() => setIsStockAdjustmentModalOpen(true)}
+        onOpeningBalanceRequest={async (product, quantity, location, idempotencyKey) => {
+          await createApprovalRequest(vendor.id, {
+            entityType: 'OPENING_BALANCE_ADJUSTMENT', entityId: `opening_${product.id}_${location.id}`, idempotencyKey,
+            title: `Opening balance for ${product.sku}`, description: `Controlled opening quantity from new Product Details for ${product.name}.`,
+            requester: { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role },
+            branchId: location.type === 'branch' ? location.id : undefined, branchName: location.type === 'branch' ? location.name : undefined,
+            warehouseId: location.type === 'warehouse' ? location.id : undefined, warehouseName: location.type === 'warehouse' ? location.name : undefined,
+            dataPayload: { locationType: location.type, locationId: location.id, locationName: location.name, reason: 'NEW_PRODUCT_OPENING_BALANCE', idempotencyKey, items: [{ productId: product.id, productName: product.name, sku: product.sku, quantity, quantityDelta: quantity, unitOfMeasure: product.unitOfMeasure, reason: 'Opening balance from approved new product setup' }] },
+          });
+          await logBIEvent(vendor.id, 'OPENING_BALANCE_REQUEST_CREATED', `Opening balance requested for ${product.sku}`, { productId: product.id, stockLocationId: location.id, outcome: 'pending_approval', correlationId: idempotencyKey }, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role });
+        }}
       />
 
       <ProductImportModal
@@ -1125,7 +1175,9 @@ export default function App() {
         onClose={() => setIsImportModalOpen(false)}
         vendor={vendor}
         existingProducts={products}
+        locations={[...warehouses.map(item => ({ id: item.id, code: item.code, name: item.name, type: 'warehouse' as const })), ...branches.map(item => ({ id: item.id, code: item.code, name: item.name, type: 'branch' as const }))]}
         onConfirmImport={handleConfirmImport}
+        onImportEvent={(type, details) => logBIEvent(vendor.id, type, type.replaceAll('_', ' ').toLowerCase(), details, activeStaff ? { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role } : undefined)}
       />
 
       <PaymentModal

@@ -20,6 +20,16 @@ export const DEFAULT_INVENTORY_APPROVAL_POLICY: InventoryApprovalPolicy = {
   supplierReceiptAutoApprovalRoles: [],
 };
 
+export function createIdempotentApprovalRequestId(vendorId: string, idempotencyKey: string): string {
+  const value = `${vendorId}:${idempotencyKey.trim()}`;
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `appr_idem_${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
 export const INVENTORY_WORKFLOW_POLICIES: Record<CriticalInventoryEntityType, InventoryWorkflowPolicy> = {
   WAREHOUSE_TO_BRANCH_TRANSFER: {
     submitRoles: ['sysadmin', 'manager', 'warehouse_staff'],
