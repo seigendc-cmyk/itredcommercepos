@@ -127,6 +127,9 @@ export interface Terminal {
   createdAt: string;
 }
 
+export type ProductType = 'INVENTORY' | 'NON_INVENTORY' | 'SERVICE' | 'BOM' | 'OTHER';
+export type ProductLifecycleStatus = 'active' | 'archived';
+
 export interface Product {
   id: string;
   vendorId: string;
@@ -134,16 +137,35 @@ export interface Product {
   name: string;
   category: string;
   description?: string;
+  size?: string;
   costPrice: number;
   sellingPrice: number;
   barcode?: string;
+  alternativeLookupCode?: string;
+  productType?: ProductType;
   brand?: string;
   manufacturerCode?: string;
-  unit: string;
+  /** @deprecated Legacy persisted field. Read through unitOfMeasure compatibility normalization. */
+  unit?: string;
+  unitOfMeasure?: string;
   reorderLevel: number;
   location?: string;
   shelf?: string;
+  bin?: string;
+  status?: ProductLifecycleStatus;
   createdAt: string;
+  updatedAt?: string;
+}
+
+export function normalizeProduct(product: Product): Product {
+  const unitOfMeasure = product.unitOfMeasure || product.unit || '';
+  return {
+    ...product,
+    unitOfMeasure,
+    unit: product.unit || unitOfMeasure,
+    productType: product.productType || 'INVENTORY',
+    status: product.status || 'active',
+  };
 }
 
 export interface Supplier {

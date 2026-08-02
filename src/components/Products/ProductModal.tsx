@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Modal } from '../Common/Modal';
 import { Product } from '../../types';
 import { saveProduct } from '../../services/db';
@@ -21,20 +21,32 @@ export const ProductModal: React.FC<ProductModalProps> = ({
 }) => {
   const [sku, setSku] = useState(productToEdit?.sku || '');
   const [name, setName] = useState(productToEdit?.name || '');
-  const [category, setCategory] = useState(productToEdit?.category || 'General');
-  const [costPrice, setCostPrice] = useState(productToEdit?.costPrice ? String(productToEdit.costPrice) : '10.00');
-  const [sellingPrice, setSellingPrice] = useState(productToEdit?.sellingPrice ? String(productToEdit.sellingPrice) : '25.00');
+  const [description, setDescription] = useState(productToEdit?.description || '');
+  const [size, setSize] = useState(productToEdit?.size || '');
+  const [category, setCategory] = useState(productToEdit?.category || '');
+  const [costPrice, setCostPrice] = useState(productToEdit ? String(productToEdit.costPrice) : '');
+  const [sellingPrice, setSellingPrice] = useState(productToEdit ? String(productToEdit.sellingPrice) : '');
   const [barcode, setBarcode] = useState(productToEdit?.barcode || '');
-  const [unit, setUnit] = useState(productToEdit?.unit || 'pcs');
-  const [reorderLevel, setReorderLevel] = useState(productToEdit?.reorderLevel ? String(productToEdit.reorderLevel) : '10');
+  const [alu, setAlu] = useState(productToEdit?.alternativeLookupCode || '');
+  const [unit, setUnit] = useState(productToEdit?.unitOfMeasure || productToEdit?.unit || '');
+  const [productType, setProductType] = useState(productToEdit?.productType || '');
+  const [reorderLevel, setReorderLevel] = useState(productToEdit ? String(productToEdit.reorderLevel) : '');
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
 
+  useEffect(() => {
+    setSku(productToEdit?.sku || ''); setName(productToEdit?.name || ''); setDescription(productToEdit?.description || '');
+    setSize(productToEdit?.size || ''); setCategory(productToEdit?.category || ''); setCostPrice(productToEdit ? String(productToEdit.costPrice) : '');
+    setSellingPrice(productToEdit ? String(productToEdit.sellingPrice) : ''); setBarcode(productToEdit?.barcode || '');
+    setAlu(productToEdit?.alternativeLookupCode || ''); setUnit(productToEdit?.unitOfMeasure || productToEdit?.unit || '');
+    setProductType(productToEdit?.productType || ''); setReorderLevel(productToEdit ? String(productToEdit.reorderLevel) : '');
+  }, [productToEdit, isOpen]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) {
-      setError('Please enter product name.');
+    if (!sku.trim() || !name.trim() || !category.trim() || !unit.trim() || !productType) {
+      setError('SKU, product name, category, unit of measure and product type are required.');
       return;
     }
 
@@ -44,14 +56,13 @@ export const ProductModal: React.FC<ProductModalProps> = ({
     try {
       await saveProduct(vendorId, {
         id: productToEdit?.id,
-        sku: sku.trim() || `ITR-${Math.floor(100 + Math.random() * 900)}`,
+        sku: sku.trim(),
         name: name.trim(),
-        category: category.trim() || 'General',
-        costPrice: parseFloat(costPrice) || 0,
-        sellingPrice: parseFloat(sellingPrice) || 0,
-        barcode: barcode.trim() || String(Math.floor(1000000000 + Math.random() * 9000000000)),
-        unit: unit.trim() || 'pcs',
-        reorderLevel: parseInt(reorderLevel) || 10,
+        description: description.trim(), size: size.trim(), category: category.trim(),
+        costPrice: Number(costPrice), sellingPrice: Number(sellingPrice),
+        barcode: barcode.trim() || undefined, alternativeLookupCode: alu.trim() || undefined,
+        unitOfMeasure: unit.trim(), unit: unit.trim(), productType: productType as Product['productType'],
+        reorderLevel: Number(reorderLevel), status: productToEdit?.status || 'active',
       });
 
       onSuccess();
@@ -80,6 +91,8 @@ export const ProductModal: React.FC<ProductModalProps> = ({
         )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="sm:col-span-2"><label className="block text-xs font-bold mb-1">Description</label><textarea value={description} onChange={e => setDescription(e.target.value)} className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl" /></div>
+          <div><label className="block text-xs font-bold mb-1">Size</label><input value={size} onChange={e => setSize(e.target.value)} className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl" /></div>
           <div>
             <label className="block text-xs font-bold text-slate-900 mb-1">
               Product Name <span className="text-[#FF6600]">*</span>
@@ -115,10 +128,16 @@ export const ProductModal: React.FC<ProductModalProps> = ({
               type="text"
               value={sku}
               onChange={(e) => setSku(e.target.value)}
-              placeholder="Auto-generated if empty"
+              required
+              placeholder="Required canonical SKU"
               className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-900 text-xs sm:text-sm font-mono font-medium focus:ring-2 focus:ring-[#FF6600] focus:outline-none"
             />
           </div>
+
+          <div>
+            <label className="block text-xs font-bold text-slate-900 mb-1">Alternative Look Up (ALU)</label><input value={alu} onChange={e => setAlu(e.target.value)} className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl" />
+          </div>
+          <div><label className="block text-xs font-bold text-slate-900 mb-1">Product Type</label><select required value={productType} onChange={e => setProductType(e.target.value)} className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl"><option value="">Select type</option><option>INVENTORY</option><option>NON_INVENTORY</option><option>SERVICE</option><option>BOM</option><option>OTHER</option></select></div>
 
           <div>
             <label className="block text-xs font-bold text-slate-900 mb-1">

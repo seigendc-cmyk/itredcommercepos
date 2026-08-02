@@ -11,6 +11,7 @@ import {
   onSnapshot,
   runTransaction,
   writeBatch
+  ,deleteDoc
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import {
@@ -61,7 +62,8 @@ import {
   PurchaseOrder,
   PurchaseOrderItem,
   PurchaseOrderStatus,
-  Supplier
+  Supplier,
+  normalizeProduct
 } from '../types';
 import { logBIEvent } from '../bi/tracker';
 import {
@@ -99,6 +101,7 @@ import {
   TransferDraftLine,
   validateTransferReceipt,
 } from './stockTransferWorkflow';
+import { assertProductPermission, determineProductRemoval, ProductUsageSummary } from './productLifecycle';
 
 // Helper for local caching/fallback to ensure snappy preview & offline resiliency
 const LOCAL_STORAGE_KEY = 'itred_pos_vendor_data_';
@@ -664,17 +667,17 @@ export async function fetchProducts(vendorId: string): Promise<Product[]> {
     const colRef = collection(db, 'vendors', vendorId, 'products');
     const snap = await getDocs(colRef);
     if (!snap.empty) {
-      return snap.docs.map(d => d.data() as Product);
+      return snap.docs.map(d => normalizeProduct(d.data() as Product));
     }
   } catch (e) {
     console.warn(e);
   }
   const raw = localStorage.getItem(`${LOCAL_STORAGE_KEY}_products_${vendorId}`);
-  if (raw) return JSON.parse(raw);
+  if (raw) return (JSON.parse(raw) as Product[]).map(normalizeProduct);
   
   // Return default starter list
   const now = new Date().toISOString();
-  const initial = STARTER_PRODUCTS.map((p, idx) => ({
+  const initial = STARTER_PRODUCTS.map((p, idx) => normalizeProduct({
     ...p,
     id: `prod_default_${idx}`,
     vendorId,
@@ -688,20 +691,29 @@ export async function fetchProducts(vendorId: string): Promise<Product[]> {
 export async function saveProduct(vendorId: string, product: Partial<Product>): Promise<Product> {
   const now = new Date().toISOString();
   const id = product.id || `prod_${Math.random().toString(36).substring(2, 9)}`;
-  const fullProduct: Product = {
+  if (!product.sku?.trim() || !product.name?.trim() || !product.category?.trim() || !(product.unitOfMeasure || product.unit)?.trim() || !product.productType) {
+    throw new Error('SKU, product name, category, unit of measure and product type are required.');
+  }
+  const fullProduct: Product = normalizeProduct({
     id,
     vendorId,
-    sku: product.sku || `SKU-${Math.floor(1000 + Math.random() * 9000)}`,
-    name: product.name || 'Untitled Product',
-    category: product.category || 'General',
+    sku: product.sku.trim(),
+    name: product.name.trim(),
+    category: product.category.trim(),
     description: product.description || '',
-    costPrice: Number(product.costPrice) || 0,
-    sellingPrice: Number(product.sellingPrice) || 0,
-    barcode: product.barcode || String(Math.floor(1000000000 + Math.random() * 9000000000)),
-    unit: product.unit || 'pcs',
-    reorderLevel: Number(product.reorderLevel) || 10,
+    size: product.size,
+    costPrice: Number(product.costPrice),
+    sellingPrice: Number(product.sellingPrice),
+    barcode: product.barcode,
+    alternativeLookupCode: product.alternativeLookupCode,
+    productType: product.productType,
+    unitOfMeasure: (product.unitOfMeasure || product.unit)!.trim(),
+    unit: (product.unitOfMeasure || product.unit)!.trim(),
+    reorderLevel: Number(product.reorderLevel),
+    status: product.status || 'active',
     createdAt: product.createdAt || now,
-  };
+    updatedAt: now,
+  });
 
   try {
     await setDoc(doc(db, 'vendors', vendorId, 'products', id), fullProduct);
@@ -726,80 +738,59 @@ export async function saveProduct(vendorId: string, product: Partial<Product>): 
 // Bulk Import Products & Stock Adjustments
 export async function bulkImportProducts(
   vendorId: string,
-  warehouseId: string,
   newProducts: Partial<Product>[],
-  stockUpdates: { productId: string; addWarehouseQty: number }[]
 ): Promise<{ createdProducts: Product[] }> {
   const now = new Date().toISOString();
   const createdProducts: Product[] = [];
-  const currentProducts = await fetchProducts(vendorId);
-  const updatedProductsList = [...currentProducts];
 
   for (const item of newProducts) {
     const id = item.id || `prod_${Math.random().toString(36).substring(2, 9)}`;
-    const fullProd: Product = {
-      id,
-      vendorId,
-      sku: item.sku || `SKU-${Math.floor(1000 + Math.random() * 9000)}`,
-      name: item.name || 'Imported Product',
-      category: item.category || 'General',
-      description: item.description || '',
-      costPrice: Number(item.costPrice) || 0,
-      sellingPrice: Number(item.sellingPrice) || 0,
-      barcode: item.barcode || String(Math.floor(1000000000 + Math.random() * 9000000000)),
-      unit: item.unit || 'pcs',
-      location: item.location || 'Central Warehouse',
-      shelf: item.shelf || 'Shelf 01',
-      reorderLevel: Number(item.reorderLevel) || 5,
-      createdAt: now,
-    };
-
-    try {
-      await setDoc(doc(db, 'vendors', vendorId, 'products', id), fullProd);
-    } catch (e) {
-      console.warn('Firestore bulk import save warning:', e);
-    }
-
+    const fullProd = await saveProduct(vendorId, { ...item, id, createdAt: now });
     createdProducts.push(fullProd);
-    updatedProductsList.unshift(fullProd);
-
-    // If stockUpdate uses temporary SKU/id mapping, match it
-    const matchingStock = stockUpdates.find(s => s.productId === item.sku || s.productId === item.id);
-    if (matchingStock) {
-      matchingStock.productId = id; // replace with real generated product ID
-    }
-  }
-
-  localStorage.setItem(`${LOCAL_STORAGE_KEY}_products_${vendorId}`, JSON.stringify(updatedProductsList));
-
-  // Update Warehouse Inventory Stock
-  if (stockUpdates.length > 0 && warehouseId) {
-    const currentWhStock = await fetchWarehouseStock(vendorId, warehouseId);
-    for (const update of stockUpdates) {
-      if (update.addWarehouseQty > 0) {
-        const prev = currentWhStock[update.productId] || 0;
-        currentWhStock[update.productId] = prev + update.addWarehouseQty;
-
-        const invId = `${vendorId}_${warehouseId}_${update.productId}`;
-        const invData: WarehouseInventory = {
-          id: invId,
-          vendorId,
-          warehouseId,
-          productId: update.productId,
-          quantity: currentWhStock[update.productId],
-          lastUpdated: now,
-        };
-        try {
-          await setDoc(doc(db, 'vendors', vendorId, 'warehouse_inventory', invId), invData);
-        } catch (e) {
-          console.warn('Firestore inventory stock update warning:', e);
-        }
-      }
-    }
-    localStorage.setItem(`${LOCAL_STORAGE_KEY}_wh_stock_${vendorId}_${warehouseId}`, JSON.stringify(currentWhStock));
   }
 
   return { createdProducts };
+}
+
+export async function inspectProductUsage(vendorId: string, productId: string): Promise<ProductUsageSummary> {
+  const stockByLocation: ProductUsageSummary['stockByLocation'] = [];
+  const references: string[] = [];
+  const collections = ['warehouse_inventory', 'branch_inventory', 'inventory_movements', 'orders', 'purchase_orders', 'supplier_receipts', 'transfers', 'adjustments', 'approval_requests'];
+  await Promise.all(collections.map(async collectionName => {
+    const snapshot = await getDocs(collection(db, 'vendors', vendorId, collectionName));
+    snapshot.docs.forEach(entry => {
+      const value = entry.data() as Record<string, unknown>;
+      if (!JSON.stringify(value).includes(productId)) return;
+      if (collectionName.endsWith('_inventory')) {
+        const quantity = Number(value.quantity || 0);
+        stockByLocation.push({ locationId: String(value.warehouseId || value.branchId || ''), locationName: String(value.warehouseId || value.branchId || ''), quantity });
+      } else references.push(collectionName);
+    });
+  }));
+  return { stockByLocation, references: [...new Set(references)] };
+}
+
+export async function archiveOrDeleteProduct(vendorId: string, product: Product, actor: WorkflowActor): Promise<'delete' | 'archive'> {
+  const usage = await inspectProductUsage(vendorId, product.id);
+  const outcome = determineProductRemoval(product, usage);
+  assertProductPermission(actor.role, outcome === 'delete' ? 'product.delete' : 'product.archive');
+  if (outcome === 'delete') {
+    await deleteDoc(doc(db, 'vendors', vendorId, 'products', product.id));
+  } else {
+    await setDoc(doc(db, 'vendors', vendorId, 'products', product.id), { status: 'archived', updatedAt: new Date().toISOString() }, { merge: true });
+  }
+  const products = (await fetchProducts(vendorId)).filter(item => outcome !== 'delete' || item.id !== product.id).map(item => item.id === product.id ? { ...item, status: 'archived' as const } : item);
+  localStorage.setItem(`${LOCAL_STORAGE_KEY}_products_${vendorId}`, JSON.stringify(products));
+  await logBIEvent(vendorId, outcome === 'delete' ? 'PRODUCT_DELETED' : 'PRODUCT_ARCHIVED', `${outcome} product ${product.sku}`, { productId: product.id, sku: product.sku, outcome }, { staffId: actor.id, staffName: actor.name, staffRole: actor.role });
+  return outcome;
+}
+
+export async function restoreProduct(vendorId: string, product: Product, actor: WorkflowActor): Promise<void> {
+  assertProductPermission(actor.role, 'product.restore');
+  await setDoc(doc(db, 'vendors', vendorId, 'products', product.id), { status: 'active', updatedAt: new Date().toISOString() }, { merge: true });
+  const products = (await fetchProducts(vendorId)).map(item => item.id === product.id ? { ...item, status: 'active' as const } : item);
+  localStorage.setItem(`${LOCAL_STORAGE_KEY}_products_${vendorId}`, JSON.stringify(products));
+  await logBIEvent(vendorId, 'PRODUCT_RESTORED', `restored product ${product.sku}`, { productId: product.id, sku: product.sku, outcome: 'restored' }, { staffId: actor.id, staffName: actor.name, staffRole: actor.role });
 }
 
 // Warehouse Inventory Fetch
@@ -1455,6 +1446,13 @@ export async function adjustBranchStock(
   requester: WorkflowActor,
 ): Promise<ApprovalRequest | StockAdjustment> {
   await requireActiveOperationalResource(vendorId, 'branch', branchId);
+  const productIndex = new Map((await fetchProducts(vendorId)).map(product => [product.id, product]));
+  items.forEach(item => {
+    const product = productIndex.get(item.productId);
+    if (!product || product.status === 'archived' || (product.productType || 'INVENTORY') !== 'INVENTORY') {
+      throw new Error(`${item.productName} is not an active inventory product and cannot be adjusted.`);
+    }
+  });
   if (type === 'opening_balance' || type === 'recount') {
     const adjustmentId = `adj_${Math.random().toString(36).substring(2, 9)}`;
     return createApprovalRequest(vendorId, {
@@ -2524,6 +2522,31 @@ export async function reviewApprovalRequest(
         ...quantity,
         createdAt: now,
       });
+    });
+    const atomicBiId = `bi_${requestId}_${completed.version}_COMPLETED`;
+    transaction.set(doc(db, 'vendors', vendorId, 'bi_logs', atomicBiId), {
+      id: atomicBiId,
+      vendorId,
+      eventType: 'INVENTORY_WORKFLOW_TRANSITION',
+      actionSummary: `${current.entityType.replaceAll('_', ' ')} completed atomically`,
+      staffId: reviewer.id,
+      staffName: reviewer.name,
+      staffRole: reviewer.role,
+      branchId: current.branchId || null,
+      branchName: current.branchName || null,
+      details: {
+        tenantId: vendorId,
+        entityType: current.entityType,
+        entityId: current.entityId,
+        requestId,
+        status: 'COMPLETED',
+        outcome: 'COMPLETED',
+        version: completed.version,
+        quantityDecisions,
+      },
+      riskScore: current.entityType === 'STOCKTAKE_ADJUSTMENT' ? 75 : 40,
+      isAnomaly: current.entityType === 'STOCKTAKE_ADJUSTMENT',
+      timestamp: now,
     });
     return completed;
     });

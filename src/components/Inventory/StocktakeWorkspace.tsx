@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Product, Warehouse, Branch, StaffMember, ApprovalRequest } from '../../types';
 import { BILossPreventionModal } from './BILossPreventionModal';
+import { buildProductLocationStockView } from '../../features/inventory/productLocationStockView';
 import { 
   Boxes, 
   Calendar, 
@@ -33,6 +34,7 @@ interface StocktakeWorkspaceProps {
   currency?: string;
   onSubmitStocktakeApproval: (approvalPayload: any) => Promise<void>;
   onNavigateToApprovals?: () => void;
+  onStockLocationChange?: (type: 'warehouse' | 'branch', id: string) => Promise<void>;
 }
 
 export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
@@ -45,7 +47,8 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
   vendorId,
   currency = '$',
   onSubmitStocktakeApproval,
-  onNavigateToApprovals
+  onNavigateToApprovals,
+  onStockLocationChange
 }) => {
   // Location state
   const [selectedLocationType, setSelectedLocationType] = useState<'warehouse' | 'branch'>('warehouse');
@@ -122,15 +125,15 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
 
   // Extract unique departments & shelves
   const allDepartments = useMemo(() => {
-    return ['ALL', ...Array.from(new Set(products.map(p => p.category)))];
+    return ['ALL', ...Array.from(new Set(products.filter(p => (p.productType || 'INVENTORY') === 'INVENTORY' && p.status !== 'archived').map(p => p.category)))];
   }, [products]);
 
   // Extract and organize shelves across products
   const allShelves = useMemo(() => {
     const shelvesSet = new Set<string>();
-    products.forEach((p, idx) => {
-      const shelfName = p.shelf || p.location || `Shelf #${(idx % 26) + 1}`;
-      shelvesSet.add(shelfName);
+    products.forEach((p) => {
+      const shelfName = p.shelf || '';
+      if (shelfName) shelvesSet.add(shelfName);
     });
     return Array.from(shelvesSet).sort();
   }, [products]);
@@ -173,8 +176,9 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
 
   // Filter products by search, department, shelf, or BI anomaly
   const displayedProducts = useMemo(() => {
-    return products.filter((p, idx) => {
-      const pShelf = p.shelf || p.location || `Shelf #${(idx % 26) + 1}`;
+    return products.filter((p) => {
+      if ((p.productType || 'INVENTORY') !== 'INVENTORY' || p.status === 'archived') return false;
+      const pShelf = p.shelf || '';
       const matchesSearch = p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
                             p.sku.toLowerCase().includes(searchTerm.toLowerCase()) ||
                             pShelf.toLowerCase().includes(searchTerm.toLowerCase());
@@ -190,14 +194,10 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
 
       // BI Anomaly check
       let matchesBI = true;
-      if (selectedBIFilter === 'NO_TRACEABLE_SALES') {
-        matchesBI = systemQty > 0 && idx % 3 === 0;
-      } else if (selectedBIFilter === 'FAST_MOVING_MISMATCH') {
-        matchesBI = (p.reorderLevel >= 15 || p.sellingPrice >= 30) && idx % 4 === 1;
-      } else if (selectedBIFilter === 'SUSPICIOUS_MOVEMENT') {
-        matchesBI = idx % 5 === 2;
-      } else if (selectedBIFilter === 'HIGH_VALUE_EXPOSURE') {
+      if (selectedBIFilter === 'HIGH_VALUE_EXPOSURE') {
         matchesBI = (p.sellingPrice || p.costPrice || 0) >= 100;
+      } else if (selectedBIFilter !== 'ALL') {
+        matchesBI = false;
       }
 
       return matchesSearch && matchesShelf && matchesDepartment && matchesDiscrepancyFilter && matchesBI;
@@ -259,7 +259,7 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
     let totalShrinkageValue = 0;
     let totalSurplusValue = 0;
 
-    products.forEach(p => {
+    products.filter(p => (p.productType || 'INVENTORY') === 'INVENTORY' && p.status !== 'archived').forEach(p => {
       totalItems++;
       const sysQty = currentStockMap[p.id] || 0;
       const cntQty = countedQuantities[p.id] !== undefined ? countedQuantities[p.id] : sysQty;
@@ -308,7 +308,7 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
       reason: string;
     }[] = [];
 
-    products.forEach((p, idx) => {
+    products.filter(p => (p.productType || 'INVENTORY') === 'INVENTORY' && p.status !== 'archived').forEach((p) => {
       const sysQty = currentStockMap[p.id] || 0;
       const cntQty = countedQuantities[p.id] !== undefined ? countedQuantities[p.id] : sysQty;
       const delta = cntQty - sysQty;
@@ -422,9 +422,9 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  onClick={() => {
+                  onClick={async () => {
                     setSelectedLocationType('warehouse');
-                    if (warehouses[0]) setSelectedLocationId(warehouses[0].id);
+                    if (warehouses[0]) { setSelectedLocationId(warehouses[0].id); await onStockLocationChange?.('warehouse', warehouses[0].id); }
                   }}
                   className={`p-2.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
                     selectedLocationType === 'warehouse'
@@ -438,9 +438,9 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
 
                 <button
                   type="button"
-                  onClick={() => {
+                  onClick={async () => {
                     setSelectedLocationType('branch');
-                    if (branches[0]) setSelectedLocationId(branches[0].id);
+                    if (branches[0]) { setSelectedLocationId(branches[0].id); await onStockLocationChange?.('branch', branches[0].id); }
                   }}
                   className={`p-2.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
                     selectedLocationType === 'branch'
@@ -460,7 +460,7 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
               </label>
               <select
                 value={selectedLocationId}
-                onChange={(e) => setSelectedLocationId(e.target.value)}
+                onChange={async (e) => { setSelectedLocationId(e.target.value); await onStockLocationChange?.(selectedLocationType, e.target.value); }}
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-[#FF6600]"
               >
                 {selectedLocationType === 'warehouse' ? (
@@ -730,8 +730,14 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="bg-slate-900 text-slate-300 font-bold uppercase tracking-wider text-[10px] border-b border-slate-800">
-                <th className="py-3 px-4">SKU & Item Details</th>
-                <th className="py-3 px-4">Shelf / Aisle Zone</th>
+                <th className="py-3 px-4">SKU</th>
+                <th className="py-3 px-4">Product Name</th>
+                <th className="py-3 px-4">Description</th>
+                <th className="py-3 px-4">Category</th>
+                <th className="py-3 px-4">Size</th>
+                <th className="py-3 px-4">UM</th>
+                <th className="py-3 px-4">Location</th>
+                <th className="py-3 px-4">Shelf / Bin</th>
                 <th className="py-3 px-4 text-center">System Qty</th>
                 <th className="py-3 px-4 text-center min-w-[180px]">Physical Counted Qty</th>
                 <th className="py-3 px-4 text-center">Variance (Delta)</th>
@@ -740,11 +746,11 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-medium">
-              {displayedProducts.map((p, idx) => {
+              {displayedProducts.map((p) => {
                 const sysQty = currentStockMap[p.id] || 0;
                 const cntQty = countedQuantities[p.id] !== undefined ? countedQuantities[p.id] : sysQty;
                 const delta = cntQty - sysQty;
-                const shelf = p.shelf || p.location || `Shelf #${(idx % 26) + 1}`;
+                const view = buildProductLocationStockView(p, { id: selectedLocationId, name: currentLocationName }, sysQty);
                 const valuationImpact = delta * (p.costPrice || 0);
 
                 const isDiscrepancy = delta !== 0;
@@ -762,45 +768,24 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
                         : 'hover:bg-slate-50/80'
                     }`}
                   >
-                    {/* Product info */}
-                    <td className="py-3 px-4">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-bold text-slate-900">{p.name}</span>
-                        {sysQty > 0 && idx % 3 === 0 && (
-                          <span className="px-1.5 py-0.2 bg-amber-100 text-amber-900 border border-amber-300 rounded text-[9px] font-bold" title="Stock available but 0 traceable sales logged in POS">
-                            ⚠️ Stocked - No Sales
-                          </span>
-                        )}
-                        {(p.reorderLevel >= 15 || p.sellingPrice >= 30) && idx % 4 === 1 && (
-                          <span className="px-1.5 py-0.2 bg-indigo-100 text-indigo-900 border border-indigo-300 rounded text-[9px] font-bold" title="Fast moving velocity product - high audit priority">
-                            🚀 Fast Moving
-                          </span>
-                        )}
-                        {idx % 5 === 2 && (
-                          <span className="px-1.5 py-0.2 bg-red-100 text-red-900 border border-red-300 rounded text-[9px] font-bold" title="Recent manual count offset without PO or manifest">
-                            🔄 Suspicious Shift
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-0.5">
-                        <span className="font-mono bg-slate-100 px-1.5 py-0.2 rounded">{p.sku}</span>
-                        <span>•</span>
-                        <span>{p.category}</span>
-                        <span>•</span>
-                        <span>Unit Cost: {currency}{(p.costPrice || 0).toFixed(2)}</span>
-                      </div>
-                    </td>
+                    <td className="py-3 px-4 font-mono font-bold">{view.sku}</td>
+                    <td className="py-3 px-4 font-bold">{view.productName}</td>
+                    <td className="py-3 px-4">{view.description || '—'}</td>
+                    <td className="py-3 px-4">{view.category}</td>
+                    <td className="py-3 px-4">{view.size || '—'}</td>
+                    <td className="py-3 px-4">{view.unitOfMeasure}</td>
+                    <td className="py-3 px-4">{view.locationName}</td>
 
                     {/* Shelf */}
                     <td className="py-3 px-4">
                       <span className="bg-slate-100 text-slate-800 font-bold px-2 py-1 rounded-lg text-[11px]">
-                        {shelf}
+                        {[view.shelfCode, view.binCode].filter(Boolean).join(' / ') || '—'}
                       </span>
                     </td>
 
                     {/* System Qty */}
                     <td className="py-3 px-4 text-center font-bold text-slate-700 text-sm">
-                      {sysQty} <span className="text-[10px] text-slate-400 font-normal">{p.unit}</span>
+                      {view.systemQuantity} <span className="text-[10px] text-slate-400 font-normal">{view.unitOfMeasure}</span>
                     </td>
 
                     {/* Physical Counted Qty Input */}
@@ -845,7 +830,7 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
                           ? 'bg-blue-100 text-blue-700 border border-blue-200' 
                           : 'bg-emerald-100 text-emerald-700 border border-emerald-200'
                       }`}>
-                        {delta > 0 ? `+${delta}` : delta} {p.unit}
+                        {delta > 0 ? `+${delta}` : delta} {view.unitOfMeasure}
                       </span>
                     </td>
 
@@ -884,7 +869,7 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
 
               {displayedProducts.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-slate-400">
+                  <td colSpan={13} className="py-12 text-center text-slate-400">
                     <Boxes className="w-8 h-8 text-slate-300 mx-auto mb-2" />
                     <p className="font-bold text-slate-600">No products match your current stocktake filter criteria.</p>
                   </td>

@@ -88,6 +88,9 @@ export async function completeSaleTransaction(
 
   const deductions = new Map<string, ProductDeduction>();
   for (const item of orderData.items) {
+    if (item.product.status === 'archived') {
+      return failure('invalid_order', `${item.product.name} is archived and cannot be added to a new sale.`);
+    }
     if (!item.product.id || !Number.isInteger(item.quantity) || item.quantity <= 0) {
       return failure('invalid_order', 'Every sale item must have a positive whole quantity.');
     }
