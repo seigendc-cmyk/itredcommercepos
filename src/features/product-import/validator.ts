@@ -1,5 +1,6 @@
 import { Product, ProductType } from '../../types';
 import { CanonicalProductImportRow, ProductImportError } from './domain';
+import { checkProductDuplicates, PRODUCT_SECTORS, TAX_OPTIONS, validateHsCode } from '../products';
 
 const PRODUCT_TYPES: ProductType[] = ['INVENTORY', 'NON_INVENTORY', 'SERVICE', 'BOM', 'OTHER'];
 
@@ -15,6 +16,9 @@ export function validateImportRows(rows: CanonicalProductImportRow[], validLocat
     if (!row.category) add(row, 'Category', 'Category is required.', 'REQUIRED');
     if (!row.unitOfMeasure) add(row, 'UM', 'Unit of measure is required.', 'REQUIRED');
     if (!row.productType || !PRODUCT_TYPES.includes(row.productType)) add(row, 'Product Type', 'Use INVENTORY, NON_INVENTORY, SERVICE, BOM or OTHER.', 'INVALID_PRODUCT_TYPE');
+    if (!row.sector || !PRODUCT_SECTORS.some(option => option.value === row.sector)) add(row, 'Industrial Sector', 'Use a controlled industrial sector value.', 'INVALID_SECTOR');
+    if (!row.taxOption || !TAX_OPTIONS.some(option => option.value === row.taxOption)) add(row, 'Tax Option', 'Use a controlled Tax Option value.', 'INVALID_TAX_OPTION');
+    const hsError = validateHsCode(row.hsCode); if (hsError) add(row, 'HS Code', hsError, 'INVALID_HS_CODE');
     for (const [field, value] of [['Cost', row.costPrice], ['Price', row.sellingPrice], ['Qty', row.quantity], ['Reorder Level', row.reorderLevel]] as const) {
       if (value !== undefined && (!Number.isFinite(value) || value < 0)) add(row, field, `${field} must be numeric and at least zero.`, 'INVALID_NUMBER');
     }
@@ -45,22 +49,14 @@ export function validateImportRows(rows: CanonicalProductImportRow[], validLocat
   return rows.flatMap(row => row.errors);
 }
 
-function tokens(value: string): Set<string> { return new Set(value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)); }
-function similarity(a: string, b: string): number {
-  const left = tokens(a); const right = tokens(b); const union = new Set([...left, ...right]);
-  return union.size ? [...left].filter(value => right.has(value)).length / union.size : 0;
-}
-
 export function detectProductDuplicates(rows: CanonicalProductImportRow[], products: Product[]): void {
   rows.forEach(row => {
-    const exact = products.find(product => product.sku.toLowerCase() === row.sku.toLowerCase())
-      || (row.barcode ? products.find(product => product.barcode?.toLowerCase() === row.barcode.toLowerCase()) : undefined);
-    const alu = row.alternativeLookupCode ? products.find(product => product.alternativeLookupCode?.toLowerCase() === row.alternativeLookupCode.toLowerCase()) : undefined;
-    if (exact) { row.duplicateProduct = exact; row.warnings.push('Exact SKU or barcode duplicate requires an explicit decision.'); }
-    else if (alu) { row.duplicateProduct = alu; row.warnings.push('Duplicate ALU requires deliberate review.'); }
-    else {
-      const fuzzy = products.map(product => ({ product, score: similarity(row.name, product.name) })).sort((a, b) => b.score - a.score)[0];
-      if (fuzzy?.score >= 0.65) row.warnings.push(`Possible name duplicate: ${fuzzy.product.name}. No merge will occur automatically.`);
-    }
+    const matches = checkProductDuplicates({ ...row, vendorId: products[0]?.vendorId, alternativeLookupCode: row.alternativeLookupCode, sectorAttributes: {} }, products);
+    const match = matches[0];
+    if (!match) return;
+    row.duplicateProduct = match.product;
+    row.warnings.push(match.blocking
+      ? `Exact identifier duplicate (${match.reasons.join(', ')}) requires Use Existing or an explicit update.`
+      : `Possible duplicate ${match.product.name} (${match.reasons.join(', ')}). No merge will occur automatically.`);
   });
 }

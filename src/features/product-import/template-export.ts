@@ -29,6 +29,8 @@ export async function createProductTemplateWorkbook(options: ProductTemplateOpti
     products.getCell(`I${row}`).dataValidation = { type: 'list', allowBlank: false, formulae: ["'Reference Data'!$B$2:$B$9"] };
     if (options.categories.length) products.getCell(`D${row}`).dataValidation = { type: 'list', allowBlank: false, formulae: [`'Reference Data'!$C$2:$C$${options.categories.length + 1}`] };
     if (options.locations.length) products.getCell(`J${row}`).dataValidation = { type: 'list', allowBlank: true, formulae: [`'Reference Data'!$D$2:$D$${options.locations.length + 1}`] };
+    products.getCell(`Q${row}`).dataValidation = { type: 'list', allowBlank: false, formulae: ['"MOTOR_SPARES,CLOTHING,PHARMACY,GROCERIES,FURNITURE,HARDWARE,AGRO_CHEMICALS,GENERAL,SERVICES"'] };
+    products.getCell(`S${row}`).dataValidation = { type: 'list', allowBlank: false, formulae: ['"STANDARD_RATED,ZERO_RATED,EXEMPT,NON_TAXABLE,OUT_OF_SCOPE"'] };
   }
   const metadata = workbook.addWorksheet('_Template_Metadata', { state: 'veryHidden' });
   [['templateName', PRODUCT_IMPORT_TEMPLATE_NAME], ['templateVersion', PRODUCT_IMPORT_TEMPLATE_VERSION], ['schemaVersion', PRODUCT_IMPORT_SCHEMA_VERSION], ['generatedAt', new Date().toISOString()], ['tenantId', options.tenantId || ''], ['applicationVersion', options.applicationVersion || '']].forEach(row => metadata.addRow(row));

@@ -5,11 +5,11 @@ import { buildOpeningBalanceRequest, CANONICAL_PRODUCT_HEADERS, createProductTem
 import { parseCanonicalMatrix, parseCsv, parseProductImportFile, validateHeaders, validateImportFile } from './parser';
 import { detectProductDuplicates } from './validator';
 
-const valid = ['SKU-1', 'Widget', 'Quoted, useful product', 'General', 'M', '1', '2', '0', 'pcs', '', 'ALU-1', 'INVENTORY', '123', 'S1', 'B1', '2'];
+const valid = ['SKU-1', 'Widget', 'Quoted, useful product', 'General', 'M', '1', '2', '0', 'pcs', '', 'ALU-1', 'INVENTORY', '123', 'S1', 'B1', '2', 'GENERAL', '0101.21', 'STANDARD_RATED', '', '', '', ''];
 const matrix = (row: unknown[] = valid) => [[...CANONICAL_PRODUCT_HEADERS], row];
 
 test('canonical CSV is accepted and quoted commas map only to Description', () => {
-  const csv = `${CANONICAL_PRODUCT_HEADERS.join(',')}\r\nSKU-1,Widget,"Quoted, useful product",General,M,1,2,0,pcs,,ALU-1,INVENTORY,123,S1,B1,2\r\n`;
+  const csv = `${CANONICAL_PRODUCT_HEADERS.join(',')}\r\nSKU-1,Widget,"Quoted, useful product",General,M,1,2,0,pcs,,ALU-1,INVENTORY,123,S1,B1,2,GENERAL,0101.21,STANDARD_RATED,,,,\r\n`;
   const batch = parseCanonicalMatrix(parseCsv(csv), 'products.csv', []);
   assert.equal(batch.errors.length, 0); assert.equal(batch.rows[0].sku, 'SKU-1'); assert.equal(batch.rows[0].name, 'Widget'); assert.equal(batch.rows[0].category, 'General'); assert.equal(batch.rows[0].description, 'Quoted, useful product');
 });
@@ -40,11 +40,11 @@ test('blank quantity never becomes 10 and invalid quantities/locations are rejec
   const service = [...valid]; service[7] = '1'; service[11] = 'SERVICE'; assert.ok(parseCanonicalMatrix(matrix(service), 'products.csv', []).errors.some(error => error.code === 'QUANTITY_NOT_ALLOWED'));
 });
 
-test('duplicate SKU requires explicit decision and fuzzy names never auto-merge', () => {
+test('duplicate SKU and possible name matches require explicit decisions and never auto-merge', () => {
   const product: Product = { id: 'p1', vendorId: 'v1', sku: 'SKU-1', name: 'Widget Blue Large', category: 'General', costPrice: 1, sellingPrice: 2, unit: 'pcs', reorderLevel: 0, createdAt: 'now' };
   const exact = parseCanonicalMatrix(matrix(), 'products.csv', []).rows; detectProductDuplicates(exact, [product]); assert.equal(exact[0].decision, undefined); assert.equal(exact[0].duplicateProduct?.id, 'p1');
   const fuzzyRow = [...valid]; fuzzyRow[0] = 'SKU-2'; fuzzyRow[1] = 'Large Blue Widget'; fuzzyRow[12] = '';
-  const fuzzy = parseCanonicalMatrix(matrix(fuzzyRow), 'products.csv', []).rows; detectProductDuplicates(fuzzy, [product]); assert.equal(fuzzy[0].duplicateProduct, undefined); assert.equal(fuzzy[0].decision, undefined);
+  const fuzzy = parseCanonicalMatrix(matrix(fuzzyRow), 'products.csv', []).rows; detectProductDuplicates(fuzzy, [product]); assert.equal(fuzzy[0].duplicateProduct?.id, 'p1'); assert.equal(fuzzy[0].decision, undefined);
 });
 
 test('import quantity creates a controlled opening-balance request instead of a movement', () => {

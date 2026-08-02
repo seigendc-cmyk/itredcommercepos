@@ -1,17 +1,18 @@
-import { Product, ProductType } from '../../types';
+import { Product, ProductSector, ProductType, TaxOption } from '../../types';
 
 export const PRODUCT_IMPORT_TEMPLATE_NAME = 'ITRED_PRODUCT_IMPORT';
-export const PRODUCT_IMPORT_TEMPLATE_VERSION = '1.0.0';
-export const PRODUCT_IMPORT_SCHEMA_VERSION = '1';
+export const PRODUCT_IMPORT_TEMPLATE_VERSION = '2.0.0';
+export const PRODUCT_IMPORT_SCHEMA_VERSION = '2';
 
 export const CANONICAL_PRODUCT_HEADERS = [
   'SKU', 'Product Name', 'Description', 'Category', 'Size', 'Cost', 'Price', 'Qty',
   'UM', 'Location', 'Alternative Look Up (ALU)', 'Product Type', 'Barcode', 'Shelf',
-  'Bin', 'Reorder Level',
+  'Bin', 'Reorder Level', 'Industrial Sector', 'HS Code', 'Tax Option', 'Primary Supplier ID',
+  'Primary Supplier Name', 'Brand', 'Manufacturer',
 ] as const;
 
 export type CanonicalProductHeader = typeof CANONICAL_PRODUCT_HEADERS[number];
-export type ProductImportDecision = 'CREATE' | 'UPDATE_EXISTING' | 'OPENING_BALANCE' | 'SKIP';
+export type ProductImportDecision = 'CREATE' | 'USE_EXISTING' | 'UPDATE_EXISTING' | 'CONTINUE_SEPARATE' | 'OPENING_BALANCE' | 'SKIP';
 
 export interface ProductImportError {
   row: number;
@@ -38,10 +39,18 @@ export interface CanonicalProductImportRow {
   shelfCode: string;
   binCode: string;
   reorderLevel?: number;
+  sector?: ProductSector;
+  hsCode: string;
+  taxOption?: TaxOption;
+  primarySupplierId: string;
+  primarySupplierName: string;
+  brand: string;
+  manufacturer: string;
   errors: ProductImportError[];
   warnings: string[];
   duplicateProduct?: Product;
   decision?: ProductImportDecision;
+  duplicateReason?: string;
 }
 
 export interface ProductImportBatch {
@@ -74,6 +83,18 @@ export function toProductMaster(row: CanonicalProductImportRow): Partial<Product
     productType: row.productType,
     barcode: row.barcode || undefined,
     reorderLevel: row.reorderLevel ?? 0,
+    sector: row.sector,
+    hsCode: row.hsCode || undefined,
+    taxOption: row.taxOption,
+    primarySupplierId: row.primarySupplierId || undefined,
+    primarySupplierName: row.primarySupplierName || undefined,
+    brand: row.brand || undefined,
+    manufacturer: row.manufacturer || undefined,
+    location: row.locationCode || undefined,
+    shelfCode: row.shelfCode || undefined,
+    shelf: row.shelfCode || undefined,
+    binCode: row.binCode || undefined,
+    bin: row.binCode || undefined,
     status: 'active',
   };
 }

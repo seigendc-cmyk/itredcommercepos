@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-react';
 import { BIEventType } from '../../bi/types';
+import { closeStockIncident, hasStockActionPermission, loadTargetedCountSessions, recordStockIncident, reconcileTargetedCount, saveStockIncidents, saveTargetedCountSession, StockActionIncident } from '../../features/stock-assurance';
 import {
   buildCycleCountSchedule,
   buildWorkingDayDefinitions,
@@ -118,6 +119,22 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
   const [showSystemQuantity, setShowSystemQuantity] = useState(!settings.blindCountEnabled);
   const [includeNotes, setIncludeNotes] = useState(true);
   const [includeRecount, setIncludeRecount] = useState(true);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(`itred_stocktake_deep_link_${vendorId}`);
+      if (!raw) return;
+      const link = JSON.parse(raw) as { stockLocationId?: string; productName?: string; workingDayNumber?: number };
+      const warehouse = warehouses.find(item => item.id === link.stockLocationId);
+      const branch = branches.find(item => item.id === link.stockLocationId);
+      if (warehouse || branch) {
+        setSelectedLocationType(warehouse ? 'warehouse' : 'branch');
+        setSelectedLocationId((warehouse || branch)!.id);
+      }
+      if (link.workingDayNumber && link.workingDayNumber >= 1 && link.workingDayNumber <= 26) setActiveCycleDay(link.workingDayNumber);
+      if (link.productName) setFilters(previous => ({ ...previous, search: link.productName || '' }));
+    } catch { /* Invalid deep links are ignored without losing the normal workspace. */ }
+  }, [branches, vendorId, warehouses]);
 
   const canView = hasStocktakePermission(activeStaff.role, 'stocktake.view');
   const canPerform = hasStocktakePermission(activeStaff.role, 'stocktake.perform');
@@ -217,6 +234,48 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
   // Log once for each authoritative selected-day scope.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCycleDay, schedule.cycleId, selectedLocationId, dayRows.length]);
+
+  useEffect(() => {
+    if (!selectedLocation || !dayRows.length || !activeWorkingDay?.scheduledDate || !hasStockActionPermission(activeStaff.role, 'stock.notifications.receive')) return;
+    if (activeWorkingDay.scheduledDate >= new Date().toISOString().slice(0, 10) || ['SUBMITTED', 'APPROVED', 'COMPLETED'].includes(currentStatus)) return;
+    const now = new Date().toISOString();
+    dayRows.forEach(row => {
+      const result = recordStockIncident(vendorId, {
+        tenantId: vendorId, vendorId, stockLocationId: selectedLocationId, stockLocationName: currentLocationName,
+        productId: row.productId, productName: row.productName, countScopeId: `${schedule.cycleId}:${activeCycleDay}:${row.productId}`,
+        workingDayNumber: activeCycleDay, shelfCode: row.shelfCode, binCode: row.binCode, category: 'COUNT_OVERDUE', severity: 'MEDIUM',
+        reasonCodes: ['SCHEDULED_COUNT_OVERDUE'], suggestedAction: 'The scheduled count is overdue and requires verification.',
+        createdBy: activeStaff.id, dueDate: activeWorkingDay.scheduledDate, correlationId: `${correlationId}:${row.productId}`,
+        evidence: { id: `${schedule.cycleId}:${activeCycleDay}:${row.productId}:overdue`, occurredAt: now, reasonCode: 'SCHEDULED_COUNT_OVERDUE', summary: `Working Day ${activeCycleDay} count was not completed by its scheduled date.`, sourceEntityId: schedule.cycleId }, now,
+      }, activeStaff.role);
+      if (result.created) {
+        void onLogBIEvent?.('STOCK_COUNT_RECOMMENDED', eventDetails({ productId: row.productId, shelfCode: row.shelfCode, binCode: row.binCode, incidentId: result.incident.id, reasonCodes: result.incident.reasonCodes, severity: result.incident.severity, outcome: 'recommended' }));
+        void onLogBIEvent?.('STOCK_ACTION_SENT_TO_MANAGEMENT_DESK', eventDetails({ productId: row.productId, incidentId: result.incident.id, reasonCodes: result.incident.reasonCodes, severity: result.incident.severity, outcome: 'queued' }));
+      }
+    });
+  // Incident evidence is deterministic; the store deduplicates repeated renders and refreshes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCycleDay, activeWorkingDay?.scheduledDate, currentStatus, dayRows, selectedLocationId]);
+
+  useEffect(() => {
+    if (!['APPROVED', 'COMPLETED'].includes(currentStatus) || !hasStockActionPermission(activeStaff.role, 'stock.incident.close')) return;
+    try {
+      const link = JSON.parse(localStorage.getItem(`itred_stocktake_deep_link_${vendorId}`) || 'null') as { incidentId?: string; countSessionId?: string } | null;
+      if (!link?.incidentId) return;
+      const incidents: StockActionIncident[] = JSON.parse(localStorage.getItem(`itred_stock_incidents_${vendorId}`) || '[]');
+      const incident = incidents.find(item => item.id === link.incidentId && item.status !== 'CLOSED');
+      if (!incident) return;
+      const closed = closeStockIncident(incident, activeStaff.role, 'Targeted count was approved and its inventory workflow completed.', new Date().toISOString());
+      saveStockIncidents(vendorId, incidents.map(item => item.id === closed.id ? closed : item));
+      if (link.countSessionId) {
+        const session = loadTargetedCountSessions(vendorId).find(item => item.id === link.countSessionId);
+        if (session) saveTargetedCountSession(vendorId, { ...session, status: 'CLOSED' });
+      }
+      void onLogBIEvent?.('STOCK_INCIDENT_CLOSED', eventDetails({ incidentId: closed.id, countSessionId: link.countSessionId, outcome: closed.outcome }));
+      localStorage.removeItem(`itred_stocktake_deep_link_${vendorId}`);
+    } catch { /* A permitted management view will retry closure after the workflow refreshes. */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeStaff.role, currentStatus, vendorId]);
 
   if (!canView) {
     return <div className="border border-red-300 bg-red-50 p-6 text-red-900 font-bold">You do not have permission to view or export this stocktake list.</div>;
@@ -388,6 +447,18 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
           items,
         },
       });
+      try {
+        const deepLink = JSON.parse(localStorage.getItem(`itred_stocktake_deep_link_${vendorId}`) || 'null') as { countSessionId?: string; productId?: string } | null;
+        const session = deepLink?.countSessionId ? loadTargetedCountSessions(vendorId).find(item => item.id === deepLink.countSessionId) : undefined;
+        const targetRow = session ? dayRows.find(row => row.productId === session.productId) : undefined;
+        if (session && targetRow && counts[targetRow.productId] !== undefined) {
+          const movementDelta = targetRow.systemQuantity - session.openingSystemQuantity;
+          const reconciled = reconcileTargetedCount(session, counts[targetRow.productId], movementDelta === 0 ? [] : [{ id: `live_${correlationId}`, productId: session.productId, stockLocationId: session.stockLocationId, quantityDelta: movementDelta, occurredAt: new Date(Date.parse(session.openingTimestamp) + 1).toISOString() }], activeStaff.role, new Date().toISOString());
+          saveTargetedCountSession(vendorId, reconciled);
+          await onLogBIEvent?.('TARGETED_COUNT_RECONCILED', eventDetails({ productId: session.productId, countSessionId: session.id, adjustedExpectedQuantity: reconciled.adjustedExpectedQuantity, variance: reconciled.variance, outcome: 'awaiting_review' }));
+          await onLogBIEvent?.('TARGETED_COUNT_SUBMITTED', eventDetails({ productId: session.productId, countSessionId: session.id, outcome: 'submitted' }));
+        }
+      } catch { /* The scheduled-day approval remains authoritative if no targeted session is active. */ }
       clearStocktakeDraft(vendorId, schedule.cycleId, selectedLocationId, activeCycleDay);
       setIsDirty(false); setShowSubmitDialog(false);
       setDayStatuses(previous => ({ ...previous, [activeCycleDay]: 'SUBMITTED' }));

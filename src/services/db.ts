@@ -103,6 +103,7 @@ import {
   validateTransferReceipt,
 } from './stockTransferWorkflow';
 import { assertProductPermission, determineProductRemoval, ProductUsageSummary } from './productLifecycle';
+import { assertCanonicalProductReference, assertDuplicateDecision, checkProductDuplicates, normalizeHsCode, ProductDuplicateDecisionInput, validateHsCode, assertExtendedProductPermission, effectiveProductTaxRate } from '../features/products';
 
 // Helper for local caching/fallback to ensure snappy preview & offline resiliency
 const LOCAL_STORAGE_KEY = 'itred_pos_vendor_data_';
@@ -688,14 +689,43 @@ export async function fetchProducts(vendorId: string): Promise<Product[]> {
   return initial;
 }
 
-// Save or Update Product
-export async function saveProduct(vendorId: string, product: Partial<Product>): Promise<Product> {
+export interface ProductSaveOptions {
+  actor: WorkflowActor;
+  vendorTaxRate: number;
+  duplicateDecision?: ProductDuplicateDecisionInput;
+}
+
+// Save or Update Product through canonical validation, permission and duplicate controls.
+export async function saveProduct(vendorId: string, product: Partial<Product>, options: ProductSaveOptions): Promise<Product> {
   const now = new Date().toISOString();
   const id = product.id || `prod_${Math.random().toString(36).substring(2, 9)}`;
+  assertExtendedProductPermission(options.actor.role, product.id ? 'product.update' : 'product.create');
   if (!product.sku?.trim() || !product.name?.trim() || !product.category?.trim() || !(product.unitOfMeasure || product.unit)?.trim() || !product.productType) {
     throw new Error('SKU, product name, category, unit of measure and product type are required.');
   }
+  if (!product.sector) throw new Error('Industrial sector is required.');
+  const hsError = validateHsCode(product.hsCode || '');
+  if (hsError) throw new Error(hsError);
+  const current = await fetchProducts(vendorId);
+  const existing = current.find(item => item.id === id);
+  if ((product.hsCode || '') !== (existing?.hsCode || '')) assertExtendedProductPermission(options.actor.role, 'product.hs_code.edit');
+  if (existing && product.taxOption !== existing.taxOption) assertExtendedProductPermission(options.actor.role, 'product.tax.edit');
+  if (!existing && product.taxOption && product.taxOption !== 'STANDARD_RATED') assertExtendedProductPermission(options.actor.role, 'product.tax.edit');
+  const candidate: Partial<Product> = { ...existing, ...product, id, vendorId };
+  const duplicateMatches = checkProductDuplicates(candidate, current);
+  await logBIEvent(vendorId, 'PRODUCT_DUPLICATE_CHECKED', `Duplicate check completed for ${product.sku}`, { productId: id, outcome: duplicateMatches.length ? 'matches_found' : 'clear', duplicateConfidence: duplicateMatches[0]?.confidence || 0, reasonCodes: duplicateMatches.flatMap(match => match.reasons) }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+  if (duplicateMatches.length) {
+    await logBIEvent(vendorId, 'PRODUCT_DUPLICATE_DETECTED', `Possible duplicate detected for ${product.sku}`, { productId: id, existingProductIds: duplicateMatches.map(match => match.product.id), duplicateConfidence: duplicateMatches[0].confidence, reasonCodes: duplicateMatches.flatMap(match => match.reasons), outcome: 'review_required' }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+  }
+  assertDuplicateDecision(duplicateMatches, options.duplicateDecision, options.actor.role);
+  if (duplicateMatches.length && options.duplicateDecision) {
+    await logBIEvent(vendorId, 'PRODUCT_DUPLICATE_DECISION_RECORDED', `Duplicate decision recorded for ${product.sku}`, { productId: id, decision: options.duplicateDecision.decision, duplicateConfidence: duplicateMatches[0].confidence, outcome: 'confirmed_separate' }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+    await logBIEvent(vendorId, 'PRODUCT_DUPLICATE_OVERRIDE', `Possible duplicate override recorded for ${product.sku}`, { productId: id, decision: options.duplicateDecision.decision, reasonCode: 'AUTHORIZED_SEPARATE_PRODUCT', outcome: 'overridden' }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+  }
+  const taxOption = product.taxOption || existing?.taxOption || 'STANDARD_RATED';
   const fullProduct: Product = normalizeProduct({
+    ...existing,
+    ...product,
     id,
     vendorId,
     sku: product.sku.trim(),
@@ -708,6 +738,22 @@ export async function saveProduct(vendorId: string, product: Partial<Product>): 
     barcode: product.barcode,
     alternativeLookupCode: product.alternativeLookupCode,
     productType: product.productType,
+    sector: product.sector,
+    sectorAttributes: product.sectorAttributes || {},
+    hsCode: normalizeHsCode(product.hsCode || ''),
+    taxOption,
+    applicableTaxRate: effectiveProductTaxRate(taxOption, options.vendorTaxRate),
+    taxCode: product.taxCode,
+    taxCategory: product.taxCategory,
+    primarySupplierId: product.primarySupplierId,
+    primarySupplierName: product.primarySupplierName,
+    brand: product.brand,
+    manufacturer: product.manufacturer,
+    shelfCode: product.shelfCode || product.shelf,
+    shelf: product.shelfCode || product.shelf,
+    binCode: product.binCode || product.bin,
+    bin: product.binCode || product.bin,
+    location: product.location,
     unitOfMeasure: (product.unitOfMeasure || product.unit)!.trim(),
     unit: (product.unitOfMeasure || product.unit)!.trim(),
     reorderLevel: Number(product.reorderLevel),
@@ -722,7 +768,6 @@ export async function saveProduct(vendorId: string, product: Partial<Product>): 
     console.warn(e);
   }
 
-  const current = await fetchProducts(vendorId);
   const idx = current.findIndex(p => p.id === id);
   let updated: Product[];
   if (idx >= 0) {
@@ -733,6 +778,13 @@ export async function saveProduct(vendorId: string, product: Partial<Product>): 
   }
   localStorage.setItem(`${LOCAL_STORAGE_KEY}_products_${vendorId}`, JSON.stringify(updated));
 
+  if ((existing?.taxOption || 'STANDARD_RATED') !== fullProduct.taxOption) {
+    await logBIEvent(vendorId, 'PRODUCT_TAX_OPTION_UPDATED', `Product tax classification updated for ${fullProduct.sku}`, { productId: id, taxOption: fullProduct.taxOption, applicableTaxRate: fullProduct.applicableTaxRate, outcome: 'updated' }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+  }
+  if ((existing?.hsCode || '') !== (fullProduct.hsCode || '')) {
+    await logBIEvent(vendorId, 'PRODUCT_HS_CODE_UPDATED', `Product HS classification updated for ${fullProduct.sku}`, { productId: id, hsCodePresent: Boolean(fullProduct.hsCode), outcome: 'updated' }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+  }
+
   return fullProduct;
 }
 
@@ -740,13 +792,14 @@ export async function saveProduct(vendorId: string, product: Partial<Product>): 
 export async function bulkImportProducts(
   vendorId: string,
   newProducts: Partial<Product>[],
+  options: ProductSaveOptions,
 ): Promise<{ createdProducts: Product[] }> {
   const now = new Date().toISOString();
   const createdProducts: Product[] = [];
 
   for (const item of newProducts) {
     const id = item.id || `prod_${Math.random().toString(36).substring(2, 9)}`;
-    const fullProd = await saveProduct(vendorId, { ...item, id, createdAt: now });
+    const fullProd = await saveProduct(vendorId, { ...item, id, createdAt: now }, options);
     createdProducts.push(fullProd);
   }
 
@@ -1997,6 +2050,10 @@ export async function createApprovalRequest(
 ): Promise<ApprovalRequest> {
   const now = new Date().toISOString();
   const policy = await fetchInventoryApprovalPolicy(vendorId);
+  if (submission.dataPayload.items?.length) {
+    const canonicalProducts = await fetchProducts(vendorId);
+    submission.dataPayload.items.forEach(item => assertCanonicalProductReference(canonicalProducts, item.productId));
+  }
   const idempotencyKey = submission.idempotencyKey?.trim();
   const id = idempotencyKey
     ? createIdempotentApprovalRequestId(vendorId, idempotencyKey)

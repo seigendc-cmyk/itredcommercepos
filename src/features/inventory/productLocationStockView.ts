@@ -30,8 +30,8 @@ export function buildProductLocationStockView(product: Product, location: { id: 
     productType: product.productType || 'INVENTORY',
     stockLocationId: location.id,
     locationName: location.name,
-    shelfCode: product.shelf || '',
-    binCode: product.bin || '',
+    shelfCode: product.shelfCode || product.shelf || '',
+    binCode: product.binCode || product.bin || '',
     systemQuantity: quantity,
   };
 }

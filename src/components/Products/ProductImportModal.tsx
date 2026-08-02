@@ -51,8 +51,12 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
     if (!batch) return;
     setBatch({ ...batch, rows: batch.rows.map(row => row.rowNumber === rowNumber ? { ...row, decision } : row) });
   };
+  const setDuplicateReason = (rowNumber: number, duplicateReason: string) => {
+    if (!batch) return;
+    setBatch({ ...batch, rows: batch.rows.map(row => row.rowNumber === rowNumber ? { ...row, duplicateReason } : row) });
+  };
 
-  const unresolved = validRows.some(row => !row.decision);
+  const unresolved = validRows.some(row => !row.decision || (row.decision === 'CONTINUE_SEPARATE' && !row.duplicateReason?.trim()));
   const commit = async () => {
     if (!batch || batch.errors.length || unresolved) return;
     setBusy(true);
@@ -86,8 +90,8 @@ export const ProductImportModal: React.FC<ProductImportModalProps> = ({
                 <thead className="bg-[#1F242D] text-white"><tr>{['Row','SKU','Product Name','Category','UM','Type','Qty','Location','Duplicate Review','Decision'].map(value => <th key={value} className="p-3 text-left">{value}</th>)}</tr></thead>
                 <tbody>{batch.rows.map(row => <tr key={row.rowNumber} className="border-t align-top">
                   <td className="p-3">{row.rowNumber}</td><td className="p-3 font-mono font-bold">{row.sku}</td><td className="p-3 font-bold">{row.name}</td><td className="p-3">{row.category}</td><td className="p-3">{row.unitOfMeasure}</td><td className="p-3">{row.productType}</td><td className="p-3">{row.quantity ?? 'blank'}</td><td className="p-3">{row.locationCode || '—'}</td>
-                  <td className="p-3 max-w-56">{row.errors.map(error => <p key={error.field} className="text-red-700">{error.field}: {error.reason}</p>)}{row.warnings.map(warning => <p key={warning} className="text-amber-700">{warning}</p>)}{!row.errors.length && !row.warnings.length && <span className="text-green-700 flex gap-1"><CheckCircle2 className="w-3 h-3" />Ready</span>}</td>
-                  <td className="p-3"><select disabled={row.errors.length > 0} value={row.decision || ''} onChange={event => setDecision(row.rowNumber, event.target.value as CanonicalProductImportRow['decision'])} className="border p-2"><option value="">Review required</option>{!row.duplicateProduct && <option value="CREATE">Import as New</option>}{row.duplicateProduct && <option value="UPDATE_EXISTING">Update Existing Product</option>}<option value="SKIP">Skip</option></select></td>
+                  <td className="p-3 max-w-56">{row.errors.map(error => <p key={error.field} className="text-red-700">{error.field}: {error.reason}</p>)}{row.warnings.map(warning => <p key={warning} className="text-amber-700">{warning}</p>)}{row.decision === 'CONTINUE_SEPARATE' && <input aria-label={`Duplicate reason row ${row.rowNumber}`} value={row.duplicateReason || ''} onChange={event => setDuplicateReason(row.rowNumber, event.target.value)} placeholder="Reason required" className="border p-2 mt-2 w-full" />}{!row.errors.length && !row.warnings.length && <span className="text-green-700 flex gap-1"><CheckCircle2 className="w-3 h-3" />Ready</span>}</td>
+                  <td className="p-3"><select disabled={row.errors.length > 0} value={row.decision || ''} onChange={event => setDecision(row.rowNumber, event.target.value as CanonicalProductImportRow['decision'])} className="border p-2"><option value="">Review required</option>{!row.duplicateProduct && <option value="CREATE">Import as New</option>}{row.duplicateProduct && <option value="USE_EXISTING">Use Existing Product</option>}{row.duplicateProduct && <option value="UPDATE_EXISTING">Update Existing Product</option>}{row.duplicateProduct && <option value="CONTINUE_SEPARATE">Continue as Separate Product</option>}<option value="SKIP">Skip</option></select></td>
                 </tr>)}</tbody>
               </table>
             </div>

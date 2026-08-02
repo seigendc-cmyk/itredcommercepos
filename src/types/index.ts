@@ -129,6 +129,20 @@ export interface Terminal {
 
 export type ProductType = 'INVENTORY' | 'NON_INVENTORY' | 'SERVICE' | 'BOM' | 'OTHER';
 export type ProductLifecycleStatus = 'active' | 'archived';
+export type TaxOption = 'STANDARD_RATED' | 'ZERO_RATED' | 'EXEMPT' | 'NON_TAXABLE' | 'OUT_OF_SCOPE';
+export type ProductSector = 'MOTOR_SPARES' | 'CLOTHING' | 'PHARMACY' | 'GROCERIES' | 'FURNITURE' | 'HARDWARE' | 'AGRO_CHEMICALS' | 'GENERAL' | 'SERVICES';
+
+export interface ProductSectorAttributes {
+  vehicleMake?: string; vehicleModel?: string; vehicleYearFrom?: string; vehicleYearTo?: string; engineCode?: string; chassisCode?: string; oemNumber?: string; manufacturerPartNumber?: string; fitmentPosition?: string; leftRightPosition?: string;
+  brand?: string; garmentType?: string; gender?: string; size?: string; colour?: string; material?: string; season?: string; styleCode?: string;
+  genericName?: string; brandName?: string; strength?: string; dosageForm?: string; packSize?: string; batchTrackingRequired?: boolean; expiryTrackingRequired?: boolean; prescriptionClass?: string; storageCondition?: string;
+  netWeight?: string; volume?: string; flavour?: string; perishable?: boolean;
+  dimensions?: string; finish?: string; assemblyRequired?: boolean; roomType?: string; weight?: string;
+  grade?: string; threadSize?: string; voltage?: string; wattage?: string; capacity?: string; specification?: string;
+  activeIngredient?: string; concentration?: string; formulation?: string; hazardClass?: string; registrationNumber?: string; restrictedSale?: boolean;
+  manufacturer?: string; model?: string;
+  serviceDuration?: string; serviceUnit?: string; serviceDepartment?: string; requiresAppointment?: boolean; serviceNotes?: string;
+}
 
 export interface Product {
   id: string;
@@ -143,7 +157,17 @@ export interface Product {
   barcode?: string;
   alternativeLookupCode?: string;
   productType?: ProductType;
+  sector?: ProductSector;
+  sectorAttributes?: ProductSectorAttributes;
+  hsCode?: string;
+  taxOption?: TaxOption;
+  applicableTaxRate?: number;
+  taxCode?: string;
+  taxCategory?: string;
+  primarySupplierId?: string;
+  primarySupplierName?: string;
   brand?: string;
+  manufacturer?: string;
   manufacturerCode?: string;
   /** @deprecated Legacy persisted field. Read through unitOfMeasure compatibility normalization. */
   unit?: string;
@@ -152,6 +176,8 @@ export interface Product {
   location?: string;
   shelf?: string;
   bin?: string;
+  shelfCode?: string;
+  binCode?: string;
   status?: ProductLifecycleStatus;
   createdAt: string;
   updatedAt?: string;
@@ -159,10 +185,16 @@ export interface Product {
 
 export function normalizeProduct(product: Product): Product {
   const unitOfMeasure = product.unitOfMeasure || product.unit || '';
+  const shelfCode = product.shelfCode || product.shelf || '';
+  const binCode = product.binCode || product.bin || '';
   return {
     ...product,
     unitOfMeasure,
     unit: product.unit || unitOfMeasure,
+    shelfCode,
+    shelf: product.shelf || shelfCode,
+    binCode,
+    bin: product.bin || binCode,
     productType: product.productType || 'INVENTORY',
     status: product.status || 'active',
   };

@@ -84,6 +84,11 @@ function mapRow(values: unknown[], index: number): CanonicalProductImportRow {
     productType: String(values[11] ?? '').trim().toUpperCase() as CanonicalProductImportRow['productType'],
     barcode: String(values[12] ?? '').trim(), shelfCode: String(values[13] ?? '').trim(),
     binCode: String(values[14] ?? '').trim(), reorderLevel: optionalNumber(values[15]),
+    sector: String(values[16] ?? '').trim().toUpperCase() as CanonicalProductImportRow['sector'],
+    hsCode: String(values[17] ?? '').trim(),
+    taxOption: String(values[18] ?? '').trim().toUpperCase() as CanonicalProductImportRow['taxOption'],
+    primarySupplierId: String(values[19] ?? '').trim(), primarySupplierName: String(values[20] ?? '').trim(),
+    brand: String(values[21] ?? '').trim(), manufacturer: String(values[22] ?? '').trim(),
     errors: [], warnings: [],
   };
 }
