@@ -1,0 +1,3 @@
+﻿"Line No.","SKU","Product Name","Description","Category","Size","UM","Location","Shelf","Bin","System Qty","Physical Count","Recount","Notes","Count Status"
+"1","QA-ALPHA","QA Product alpha","Isolated acceptance product alpha","General","Each","pcs","QA Main Warehouse","Shelf 01","BIN-ALPHA","10","","","","ASSIGNED"
+"2","QA-ALPHA2","QA Product alpha2","Isolated acceptance product alpha2","General","Each","pcs","QA Main Warehouse","Shelf 01","BIN-ALPHA2","6","","","","ASSIGNED"
