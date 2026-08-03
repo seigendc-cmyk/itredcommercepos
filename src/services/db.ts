@@ -1031,6 +1031,10 @@ function normalizePurchaseOrder(
     vendorId,
     supplierId: String(data.supplierId || data.supplierName || ''),
     supplierName: String(data.supplierName || 'Unknown supplier'),
+    supplierAddress: data.supplierAddress ? String(data.supplierAddress) : undefined,
+    supplierPhone: data.supplierPhone ? String(data.supplierPhone) : undefined,
+    supplierBusinessNumber: data.supplierBusinessNumber ? String(data.supplierBusinessNumber) : undefined,
+    supplierTaxNumber: data.supplierTaxNumber ? String(data.supplierTaxNumber) : undefined,
     orderNumber: String(data.orderNumber || data.referenceNo || id),
     status,
     source: data.source === 'BI_RECOMMENDATION' ? 'BI_RECOMMENDATION' : 'PLANNED',
@@ -1082,6 +1086,7 @@ export async function fetchSystemInventoryTotals(vendorId: string): Promise<Reco
 export interface CreatePurchaseOrderInput {
   supplierId: string;
   supplierName: string;
+  supplierAddress?: string; supplierPhone?: string; supplierBusinessNumber?: string; supplierTaxNumber?: string;
   source: 'PLANNED' | 'BI_RECOMMENDATION';
   notes?: string;
   orderDate?: string; expectedDeliveryDate?: string; destinationWarehouseId?: string; destinationWarehouseName?: string;
@@ -1104,8 +1109,8 @@ export async function createPurchaseOrder(
   const id = `po_${crypto.randomUUID()}`;
   const orderNumber = `PO-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${id.slice(-6).toUpperCase()}`;
   const order: PurchaseOrder = {
-    id, vendorId, supplierId: input.supplierId, supplierName: input.supplierName.trim(),
-    orderNumber, status: 'PENDING_APPROVAL', source: input.source, notes: input.notes?.trim() || '', orderDate: input.orderDate || now.slice(0, 10), expectedDeliveryDate: input.expectedDeliveryDate, destinationWarehouseId: input.destinationWarehouseId, destinationWarehouseName: input.destinationWarehouseName, buyerReference: input.buyerReference, supplierQuotationNumber: input.supplierQuotationNumber, paymentTerms: input.paymentTerms, deliveryTerms: input.deliveryTerms, currency: input.currency, shippingAddress: input.shippingAddress, billingAddress: input.billingAddress,
+    id, vendorId, supplierId: input.supplierId, supplierName: input.supplierName.trim(), supplierAddress: input.supplierAddress || '', supplierPhone: input.supplierPhone || '', supplierBusinessNumber: input.supplierBusinessNumber || '', supplierTaxNumber: input.supplierTaxNumber || '',
+    orderNumber, status: 'PENDING_APPROVAL', source: input.source, notes: input.notes?.trim() || '', orderDate: input.orderDate || now.slice(0, 10), expectedDeliveryDate: input.expectedDeliveryDate || '', destinationWarehouseId: input.destinationWarehouseId || '', destinationWarehouseName: input.destinationWarehouseName || '', buyerReference: input.buyerReference || '', supplierQuotationNumber: input.supplierQuotationNumber || '', paymentTerms: input.paymentTerms || '', deliveryTerms: input.deliveryTerms || '', currency: input.currency || '', shippingAddress: input.shippingAddress || '', billingAddress: input.billingAddress || '',
     items: input.items.map(item => ({ ...item, receivedQuantity: 0 })),
     requestedBy: input.requester, createdAt: now, updatedAt: now,
   };
