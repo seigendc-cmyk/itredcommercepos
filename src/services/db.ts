@@ -1035,6 +1035,17 @@ function normalizePurchaseOrder(
     status,
     source: data.source === 'BI_RECOMMENDATION' ? 'BI_RECOMMENDATION' : 'PLANNED',
     notes: data.notes ? String(data.notes) : undefined,
+    orderDate: data.orderDate ? String(data.orderDate) : undefined,
+    expectedDeliveryDate: data.expectedDeliveryDate ? String(data.expectedDeliveryDate) : undefined,
+    destinationWarehouseId: data.destinationWarehouseId ? String(data.destinationWarehouseId) : undefined,
+    destinationWarehouseName: data.destinationWarehouseName ? String(data.destinationWarehouseName) : undefined,
+    buyerReference: data.buyerReference ? String(data.buyerReference) : undefined,
+    supplierQuotationNumber: data.supplierQuotationNumber ? String(data.supplierQuotationNumber) : undefined,
+    paymentTerms: data.paymentTerms ? String(data.paymentTerms) : undefined,
+    deliveryTerms: data.deliveryTerms ? String(data.deliveryTerms) : undefined,
+    currency: data.currency ? String(data.currency) : undefined,
+    shippingAddress: data.shippingAddress ? String(data.shippingAddress) : undefined,
+    billingAddress: data.billingAddress ? String(data.billingAddress) : undefined,
     requestedBy: data.requestedBy as WorkflowActor | undefined,
     approvedBy: data.approvedBy as WorkflowActor | undefined,
     approvedAt: data.approvedAt ? String(data.approvedAt) : undefined,
@@ -1073,6 +1084,8 @@ export interface CreatePurchaseOrderInput {
   supplierName: string;
   source: 'PLANNED' | 'BI_RECOMMENDATION';
   notes?: string;
+  orderDate?: string; expectedDeliveryDate?: string; destinationWarehouseId?: string; destinationWarehouseName?: string;
+  buyerReference?: string; supplierQuotationNumber?: string; paymentTerms?: string; deliveryTerms?: string; currency?: string; shippingAddress?: string; billingAddress?: string;
   items: Omit<PurchaseOrderItem, 'receivedQuantity'>[];
   requester: WorkflowActor;
 }
@@ -1092,7 +1105,7 @@ export async function createPurchaseOrder(
   const orderNumber = `PO-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${id.slice(-6).toUpperCase()}`;
   const order: PurchaseOrder = {
     id, vendorId, supplierId: input.supplierId, supplierName: input.supplierName.trim(),
-    orderNumber, status: 'PENDING_APPROVAL', source: input.source, notes: input.notes?.trim() || '',
+    orderNumber, status: 'PENDING_APPROVAL', source: input.source, notes: input.notes?.trim() || '', orderDate: input.orderDate || now.slice(0, 10), expectedDeliveryDate: input.expectedDeliveryDate, destinationWarehouseId: input.destinationWarehouseId, destinationWarehouseName: input.destinationWarehouseName, buyerReference: input.buyerReference, supplierQuotationNumber: input.supplierQuotationNumber, paymentTerms: input.paymentTerms, deliveryTerms: input.deliveryTerms, currency: input.currency, shippingAddress: input.shippingAddress, billingAddress: input.billingAddress,
     items: input.items.map(item => ({ ...item, receivedQuantity: 0 })),
     requestedBy: input.requester, createdAt: now, updatedAt: now,
   };
@@ -1139,6 +1152,10 @@ export async function fetchSuppliers(vendorId: string): Promise<Supplier[]> {
       vendorId,
       name: String(data.name || data.supplierName || item.id),
       code: data.code ? String(data.code) : undefined,
+      fullAddress: data.fullAddress ? String(data.fullAddress) : undefined,
+      phone: data.phone ? String(data.phone) : undefined,
+      businessNumber: data.businessNumber ? String(data.businessNumber) : undefined,
+      taxNumber: data.taxNumber ? String(data.taxNumber) : undefined,
       status: data.status === 'suspended' || data.status === 'archived' ? data.status : 'active',
       createdAt: data.createdAt ? String(data.createdAt) : undefined,
     } satisfies Supplier;
@@ -1156,6 +1173,22 @@ export async function fetchSuppliers(vendorId: string): Promise<Supplier[]> {
     });
   });
   return [...unique.values()];
+}
+
+export type NewSupplierInput = Pick<Supplier, 'name' | 'code' | 'fullAddress' | 'phone' | 'businessNumber' | 'taxNumber'>;
+
+export async function saveSupplier(vendorId: string, input: NewSupplierInput, actor: WorkflowActor): Promise<Supplier> {
+  const name = input.name.trim(); const fullAddress = input.fullAddress?.trim() || ''; const phone = input.phone?.trim() || ''; const businessNumber = input.businessNumber?.trim() || ''; const taxNumber = input.taxNumber?.trim() || '';
+  if (!name || !fullAddress || !phone || !businessNumber || !taxNumber) throw new Error('Supplier name, full address, phone, Business Number and Tax Number are required.');
+  const existing = await fetchSuppliers(vendorId);
+  if (existing.some(item => item.name.trim().toLowerCase() === name.toLowerCase())) throw new Error('A supplier with this name already exists.');
+  if (existing.some(item => item.businessNumber?.trim().toLowerCase() === businessNumber.toLowerCase())) throw new Error('A supplier with this Business Number already exists.');
+  if (existing.some(item => item.taxNumber?.trim().toLowerCase() === taxNumber.toLowerCase())) throw new Error('A supplier with this Tax Number already exists.');
+  const id = `supplier_${crypto.randomUUID()}`; const createdAt = new Date().toISOString();
+  const supplier: Supplier = { id, vendorId, name, code: input.code?.trim() || `SUP-${id.slice(-6).toUpperCase()}`, fullAddress, phone, businessNumber, taxNumber, status: 'active', createdAt };
+  await setDoc(doc(db, 'vendors', vendorId, 'suppliers', id), supplier);
+  await logBIEvent(vendorId, 'SUPPLIER_CREATED', `Supplier ${name} created`, { supplierId: id, code: supplier.code, businessNumber, taxNumberPresent: true }, { staffId: actor.id, staffName: actor.name, staffRole: actor.role });
+  return supplier;
 }
 
 export async function fetchProductLedger(
