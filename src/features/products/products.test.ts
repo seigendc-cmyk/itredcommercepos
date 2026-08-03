@@ -3,10 +3,25 @@ import test from 'node:test';
 import { Product } from '../../types';
 import {
   assertCanonicalProductReference, assertDuplicateDecision, checkProductDuplicates, DEFAULT_PRODUCT_COLUMNS,
-  effectiveProductTaxRate, loadProductColumnPreference, normalizeHsCode, normalizeProductColumns,
+  effectiveProductTaxRate, getProductSellingPrice, loadProductColumnPreference, matchesPredictiveSearch, normalizeHsCode, normalizeProductColumns,
   PRODUCT_FORM_FIELD_ORDER, PRODUCT_SECTORS, saveProductColumnPreference, searchCatalogProducts,
   SECTOR_ATTRIBUTE_FIELDS, sortCatalogProducts, TAX_OPTIONS, validateHsCode,
 } from '.';
+
+test('predictive search ignores code spacing, punctuation, case and word order', () => {
+  assert.equal(matchesPredictiveSearch('CF85', 'Honda CF 85 Filter'), true);
+  assert.equal(matchesPredictiveSearch('CF 85', 'CF85'), true);
+  assert.equal(matchesPredictiveSearch('Fit HONDA', 'Honda Fit GD1'), true);
+  assert.equal(matchesPredictiveSearch('honda-fit', 'FIT Honda'), true);
+  assert.equal(matchesPredictiveSearch('Toyota Fit', 'Honda Fit GD1'), false);
+});
+
+test('branch pricing overrides the canonical base price only for that branch', () => {
+  const priced = { ...product('priced'), sellingPrice: 10, branchPrices: { branch_a: 12.5 } };
+  assert.equal(getProductSellingPrice(priced, 'branch_a'), 12.5);
+  assert.equal(getProductSellingPrice(priced, 'branch_b'), 10);
+  assert.equal(getProductSellingPrice(priced), 10);
+});
 
 class MemoryStorage {
   data = new Map<string, string>();
@@ -54,6 +69,7 @@ test('catalog search is token-order independent across mixed fields and ranks ex
   assert.equal(searchCatalogProducts(rows, 'Shelf 01')[0].product.id, 'honda');
   assert.equal(searchCatalogProducts(rows, '8708.80')[0].product.id, 'honda');
   assert.equal(searchCatalogProducts(rows, 'Honda Fit GD1')[0].product.id, 'honda');
+  assert.equal(searchCatalogProducts(rows, 'Fit HONDA')[0].product.id, 'honda');
   assert.equal(searchCatalogProducts(rows, '40580')[0].matchType, 'EXACT');
   assert.deepEqual(searchCatalogProducts(rows, 'unrelated banana engine'), []);
 });
@@ -85,6 +101,7 @@ test('duplicates block exact identifiers, warn on ALU and require a reason witho
   assert.equal(alu[0].blocking, false); assert.throws(() => assertDuplicateDecision(alu, { decision: 'CONTINUE_SEPARATE', actorId: 'm' }, 'manager'), /reason/i);
   assert.doesNotThrow(() => assertDuplicateDecision(alu, { decision: 'CONTINUE_SEPARATE', actorId: 'm', reason: 'Different specification' }, 'manager'));
   assert.equal(checkProductDuplicates({ ...product('two'), name: 'Joint Ball Honda' }, [existing])[0].reasons.includes('SIMILAR_NAME'), true);
+  assert.equal(checkProductDuplicates({ ...product('two'), name: 'Honda Ball Joint Front Suspension Premium' }, [existing])[0].reasons.includes('SIMILAR_NAME'), true);
 });
 
 test('ledger references cannot create implicit, archived or ambiguous product identities', () => {

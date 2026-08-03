@@ -25,6 +25,7 @@ import {
   CornerDownLeft,
   Check
 } from 'lucide-react';
+import { getProductSellingPrice, matchesPredictiveSearch } from '../../features/products';
 
 interface POSTerminalProps {
   products: Product[];
@@ -72,9 +73,7 @@ export const POSTerminal: React.FC<POSTerminalProps> = ({
 
   // Filtered products for grid
   const filteredProducts = products.filter(p => {
-    const matchesSearch = p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                          p.sku.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                          (p.barcode && p.barcode.toLowerCase().includes(searchTerm.toLowerCase()));
+    const matchesSearch = matchesPredictiveSearch(searchTerm, p.name, p.sku, p.barcode, p.category, p.brand, p.manufacturer);
     const matchesCategory = selectedCategory === 'All' || p.category === selectedCategory;
     return matchesSearch && matchesCategory;
   });
@@ -82,12 +81,7 @@ export const POSTerminal: React.FC<POSTerminalProps> = ({
   // SKU Suggestions dropdown list (limit 8)
   const skuSuggestions = useMemo(() => {
     if (!searchTerm.trim()) return [];
-    const query = searchTerm.trim().toLowerCase();
-    return products.filter(p => 
-      p.sku.toLowerCase().includes(query) ||
-      p.name.toLowerCase().includes(query) ||
-      (p.barcode && p.barcode.toLowerCase().includes(query))
-    ).slice(0, 8);
+    return products.filter(p => matchesPredictiveSearch(searchTerm, p.sku, p.name, p.barcode, p.category, p.brand, p.manufacturer)).slice(0, 8);
   }, [searchTerm, products]);
 
   // Handle toast notification
@@ -132,9 +126,9 @@ export const POSTerminal: React.FC<POSTerminalProps> = ({
         {
           product,
           quantity: 1,
-          unitPrice: product.sellingPrice,
+          unitPrice: getProductSellingPrice(product, activeBranch?.id),
           discount: 0,
-          subtotal: product.sellingPrice
+          subtotal: getProductSellingPrice(product, activeBranch?.id)
         }
       ]);
       triggerToast(`Added [${product.sku}] ${product.name} to cart`);
@@ -409,7 +403,7 @@ export const POSTerminal: React.FC<POSTerminalProps> = ({
 
                         <div className="flex items-center gap-3 text-right">
                           <div>
-                            <p className="text-xs font-black text-slate-900">{currency}{product.sellingPrice.toFixed(2)}</p>
+                            <p className="text-xs font-black text-slate-900">{currency}{getProductSellingPrice(product, activeBranch?.id).toFixed(2)}</p>
                             <p className={`text-[10px] font-bold ${isOut ? 'text-rose-600' : 'text-slate-500'}`}>
                               {stock} in stock
                             </p>
@@ -478,7 +472,7 @@ export const POSTerminal: React.FC<POSTerminalProps> = ({
                   </div>
 
                   <div className="pt-2 mt-2 border-t border-slate-100 flex items-center justify-between">
-                    <span className="text-sm font-black text-slate-900">{currency}{product.sellingPrice.toFixed(2)}</span>
+                    <span className="text-sm font-black text-slate-900">{currency}{getProductSellingPrice(product, activeBranch?.id).toFixed(2)}</span>
                     <button
                       type="button"
                       className="p-1.5 bg-orange-50 text-[#FF6B00] rounded-lg group-hover:bg-[#FF6B00] group-hover:text-white transition-all"

@@ -46,6 +46,16 @@ export const INVENTORY_WORKFLOW_POLICIES: Record<CriticalInventoryEntityType, In
     approveRoles: ['sysadmin', 'manager'],
     cancelRoles: ['sysadmin', 'manager', 'warehouse_staff'],
   },
+  PURCHASE_ORDER: {
+    submitRoles: ['sysadmin', 'manager', 'warehouse_staff'],
+    approveRoles: ['sysadmin', 'manager'],
+    cancelRoles: ['sysadmin', 'manager', 'warehouse_staff'],
+  },
+  PRODUCT_COST_CHANGE: {
+    submitRoles: ['sysadmin', 'manager', 'warehouse_staff'],
+    approveRoles: ['sysadmin', 'manager'],
+    cancelRoles: ['sysadmin', 'manager', 'warehouse_staff'],
+  },
   PURCHASE_ORDER_CANCELLATION: {
     submitRoles: ['sysadmin', 'manager', 'warehouse_staff'],
     approveRoles: ['sysadmin', 'manager'],

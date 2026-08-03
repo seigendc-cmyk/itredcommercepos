@@ -10,6 +10,7 @@ import {
 } from '../../services/transferSlip';
 import { confirmStockTransferReceipt, dispatchStockTransfer } from '../../services/db';
 import { TransferReceiptModal } from './TransferReceiptModal';
+import { matchesPredictiveSearch } from '../../features/products';
 
 interface WarehouseManagementProps {
   warehouses: Warehouse[];
@@ -52,10 +53,7 @@ export const WarehouseManagement: React.FC<WarehouseManagementProps> = ({
 
   const currentWh = warehouses[0];
 
-  const filteredProducts = products.filter(p =>
-    p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.sku.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredProducts = products.filter(p => matchesPredictiveSearch(searchTerm, p.name, p.sku, p.barcode, p.category, p.brand, p.manufacturer));
 
   return (
     <div className="space-y-6">

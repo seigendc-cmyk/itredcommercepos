@@ -17,7 +17,9 @@ import {
   Truck,
   Settings,
   CreditCard,
-  Landmark
+  Landmark,
+  TableProperties,
+  ClipboardCheck
 } from 'lucide-react';
 import { VendorProfile, Branch, Terminal, Warehouse, StaffMember, AppMenuId } from '../../types';
 
@@ -50,6 +52,9 @@ const TAB_CONFIG: Record<AppMenuId, { label: string; icon: React.ReactNode }> = 
   transfers: { label: 'Transfers', icon: <ArrowLeftRight className="w-3.5 h-3.5" /> },
   branches: { label: 'Branches', icon: <Store className="w-3.5 h-3.5" /> },
   products: { label: 'Products', icon: <Package className="w-3.5 h-3.5" /> },
+  stock_matrix: { label: 'Stock by Cost Center', icon: <TableProperties className="w-3.5 h-3.5" /> },
+  managed_stocktake: { label: 'Managed Stocktake', icon: <ClipboardCheck className="w-3.5 h-3.5" /> },
+  purchase_orders: { label: 'Purchase Orders', icon: <ShoppingCart className="w-3.5 h-3.5" /> },
   customers: { label: 'Customers', icon: <UserCheck className="w-3.5 h-3.5" /> },
   financial: { label: 'Financial', icon: <Landmark className="w-3.5 h-3.5" /> },
   reports: { label: 'Reports', icon: <BarChart3 className="w-3.5 h-3.5" /> },

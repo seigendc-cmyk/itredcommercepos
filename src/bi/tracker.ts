@@ -9,6 +9,10 @@ const BI_LOCAL_STORAGE_KEY = 'itred_pos_bi_logs_';
  */
 function calculateRiskScore(eventType: BIEventType, details: Record<string, any>): number {
   switch (eventType) {
+    case 'PRODUCT_COST_BELOW_AVERAGE_ESCALATED':
+      return 85;
+    case 'PRODUCT_PRICE_CHANGED':
+      return details.newCost < details.previousCost ? 65 : 35;
     case 'STOCK_ADJUSTMENT':
       if (details.type === 'damage' || Math.abs(details.netDelta || 0) > 50) return 75;
       return 40;

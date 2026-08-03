@@ -104,6 +104,7 @@ import {
 } from './stockTransferWorkflow';
 import { assertProductPermission, determineProductRemoval, ProductUsageSummary } from './productLifecycle';
 import { assertCanonicalProductReference, assertDuplicateDecision, checkProductDuplicates, normalizeHsCode, ProductDuplicateDecisionInput, validateHsCode, assertExtendedProductPermission, effectiveProductTaxRate } from '../features/products';
+import { requiresBelowAverageCostApproval, weightedAverageCost } from '../features/inventory/averageCost';
 
 // Helper for local caching/fallback to ensure snappy preview & offline resiliency
 const LOCAL_STORAGE_KEY = 'itred_pos_vendor_data_';
@@ -695,6 +696,29 @@ export interface ProductSaveOptions {
   duplicateDecision?: ProductDuplicateDecisionInput;
 }
 
+export interface InventoryCostSnapshot { productId: string; quantity: number; averageUnitCost: number; stockValue: number; }
+
+export async function fetchInventoryCostSnapshots(vendorId: string): Promise<Record<string, InventoryCostSnapshot>> {
+  const [products, warehouse, branch] = await Promise.all([fetchProducts(vendorId), getDocs(collection(db, 'vendors', vendorId, 'warehouse_inventory')), getDocs(collection(db, 'vendors', vendorId, 'branch_inventory'))]);
+  const fallback = new Map(products.map(product => [product.id, product.costPrice]));
+  const values: Record<string, InventoryCostSnapshot> = {};
+  for (const snapshot of [...warehouse.docs, ...branch.docs]) {
+    const data = snapshot.data(); const productId = String(data.productId || ''); const quantity = Math.max(0, Number(data.quantity || 0));
+    if (!productId || !quantity) continue;
+    const unitCost = Number(data.averageUnitCost ?? fallback.get(productId) ?? 0);
+    const current = values[productId] || { productId, quantity: 0, averageUnitCost: 0, stockValue: 0 };
+    current.quantity += quantity; current.stockValue += quantity * unitCost; current.averageUnitCost = current.stockValue / current.quantity; values[productId] = current;
+  }
+  return values;
+}
+
+export async function requestBelowAverageCostChange(vendorId: string, product: Product, proposedCost: number, averageCost: number, requester: WorkflowActor): Promise<ApprovalRequest> {
+  if (!requiresBelowAverageCostApproval(proposedCost, averageCost)) throw new Error('Escalation is only required when proposed cost is below average stock cost.');
+  const request = await createApprovalRequest(vendorId, { entityType: 'PRODUCT_COST_CHANGE', entityId: product.id, idempotencyKey: `product-cost:${product.id}:${proposedCost}:${averageCost}`, title: `Below-average cost change · ${product.sku}`, description: `Proposed cost ${proposedCost.toFixed(2)} is below weighted stock average ${averageCost.toFixed(2)} and requires management review.`, requester, dataPayload: { productId: product.id, productName: product.name, sku: product.sku, previousCost: product.costPrice, proposedCost, averageCost, variance: proposedCost - averageCost, inventoryChanged: false } });
+  await logBIEvent(vendorId, 'PRODUCT_COST_BELOW_AVERAGE_ESCALATED', `Below-average cost submitted for ${product.sku}`, { productId: product.id, previousCost: product.costPrice, proposedCost, averageCost, variance: proposedCost - averageCost, approvalRequestId: request.id }, { staffId: requester.id, staffName: requester.name, staffRole: requester.role });
+  return request;
+}
+
 // Save or Update Product through canonical validation, permission and duplicate controls.
 export async function saveProduct(vendorId: string, product: Partial<Product>, options: ProductSaveOptions): Promise<Product> {
   const now = new Date().toISOString();
@@ -735,6 +759,7 @@ export async function saveProduct(vendorId: string, product: Partial<Product>, o
     size: product.size,
     costPrice: Number(product.costPrice),
     sellingPrice: Number(product.sellingPrice),
+    branchPrices: Object.fromEntries(Object.entries(product.branchPrices || {}).filter(([, price]) => Number.isFinite(Number(price)) && Number(price) >= 0).map(([branchId, price]) => [branchId, Number(price)])),
     barcode: product.barcode,
     alternativeLookupCode: product.alternativeLookupCode,
     productType: product.productType,
@@ -783,6 +808,9 @@ export async function saveProduct(vendorId: string, product: Partial<Product>, o
   }
   if ((existing?.hsCode || '') !== (fullProduct.hsCode || '')) {
     await logBIEvent(vendorId, 'PRODUCT_HS_CODE_UPDATED', `Product HS classification updated for ${fullProduct.sku}`, { productId: id, hsCodePresent: Boolean(fullProduct.hsCode), outcome: 'updated' }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
+  }
+  if (existing && (existing.costPrice !== fullProduct.costPrice || existing.sellingPrice !== fullProduct.sellingPrice || JSON.stringify(existing.branchPrices || {}) !== JSON.stringify(fullProduct.branchPrices || {}))) {
+    await logBIEvent(vendorId, 'PRODUCT_PRICE_CHANGED', `Product pricing changed for ${fullProduct.sku}`, { productId: id, sku: fullProduct.sku, previousCost: existing.costPrice, newCost: fullProduct.costPrice, previousSellingPrice: existing.sellingPrice, newSellingPrice: fullProduct.sellingPrice, previousBranchPrices: existing.branchPrices || {}, newBranchPrices: fullProduct.branchPrices || {}, effectiveAt: now }, { staffId: options.actor.id, staffName: options.actor.name, staffRole: options.actor.role });
   }
 
   return fullProduct;
@@ -993,6 +1021,8 @@ function normalizePurchaseOrder(
     rawStatus === 'PARTIALLY_RECEIVED' ||
     rawStatus === 'COMPLETED' ||
     rawStatus === 'CANCELLED' ||
+    rawStatus === 'PENDING_APPROVAL' ||
+    rawStatus === 'REJECTED' ||
     rawStatus === 'DRAFT'
       ? rawStatus
       : 'OPEN';
@@ -1003,6 +1033,12 @@ function normalizePurchaseOrder(
     supplierName: String(data.supplierName || 'Unknown supplier'),
     orderNumber: String(data.orderNumber || data.referenceNo || id),
     status,
+    source: data.source === 'BI_RECOMMENDATION' ? 'BI_RECOMMENDATION' : 'PLANNED',
+    notes: data.notes ? String(data.notes) : undefined,
+    requestedBy: data.requestedBy as WorkflowActor | undefined,
+    approvedBy: data.approvedBy as WorkflowActor | undefined,
+    approvedAt: data.approvedAt ? String(data.approvedAt) : undefined,
+    rejectedAt: data.rejectedAt ? String(data.rejectedAt) : undefined,
     items,
     createdAt: String(data.createdAt || new Date(0).toISOString()),
     updatedAt: data.updatedAt ? String(data.updatedAt) : undefined,
@@ -1016,6 +1052,71 @@ export async function fetchPurchaseOrders(vendorId: string): Promise<PurchaseOrd
   return snapshot.docs.map(order =>
     normalizePurchaseOrder(vendorId, order.id, order.data() as Record<string, unknown>),
   );
+}
+
+export async function fetchSystemInventoryTotals(vendorId: string): Promise<Record<string, number>> {
+  const [warehouse, branch] = await Promise.all([
+    getDocs(collection(db, 'vendors', vendorId, 'warehouse_inventory')),
+    getDocs(collection(db, 'vendors', vendorId, 'branch_inventory')),
+  ]);
+  const totals: Record<string, number> = {};
+  for (const snapshot of [...warehouse.docs, ...branch.docs]) {
+    const value = snapshot.data();
+    const productId = String(value.productId || '');
+    if (productId) totals[productId] = (totals[productId] || 0) + Number(value.quantity || 0);
+  }
+  return totals;
+}
+
+export interface CreatePurchaseOrderInput {
+  supplierId: string;
+  supplierName: string;
+  source: 'PLANNED' | 'BI_RECOMMENDATION';
+  notes?: string;
+  items: Omit<PurchaseOrderItem, 'receivedQuantity'>[];
+  requester: WorkflowActor;
+}
+
+export async function createPurchaseOrder(
+  vendorId: string,
+  input: CreatePurchaseOrderInput,
+): Promise<PurchaseOrder> {
+  if (!input.supplierId || !input.supplierName.trim()) throw new Error('Select a supplier.');
+  if (!input.items.length) throw new Error('Add at least one purchase-order line.');
+  input.items.forEach(item => {
+    if (item.orderedQuantity <= 0) throw new Error(`Order quantity must be positive for ${item.productName}.`);
+    if (item.unitCost < 0) throw new Error(`Unit cost cannot be negative for ${item.productName}.`);
+  });
+  const now = new Date().toISOString();
+  const id = `po_${crypto.randomUUID()}`;
+  const orderNumber = `PO-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${id.slice(-6).toUpperCase()}`;
+  const order: PurchaseOrder = {
+    id, vendorId, supplierId: input.supplierId, supplierName: input.supplierName.trim(),
+    orderNumber, status: 'PENDING_APPROVAL', source: input.source, notes: input.notes?.trim() || '',
+    items: input.items.map(item => ({ ...item, receivedQuantity: 0 })),
+    requestedBy: input.requester, createdAt: now, updatedAt: now,
+  };
+  await setDoc(doc(db, 'vendors', vendorId, 'purchase_orders', id), order);
+  try {
+    await createApprovalRequest(vendorId, {
+      entityType: 'PURCHASE_ORDER', entityId: id,
+      idempotencyKey: `purchase-order:${id}`,
+      title: `${input.source === 'BI_RECOMMENDATION' ? 'BI recommended' : 'Planned'} purchase order ${orderNumber}`,
+      description: `${order.items.length} line(s) for ${order.supplierName}; approval creates no inventory movement.`,
+      requester: input.requester,
+      dataPayload: {
+        purchaseOrderId: id, purchaseOrderNumber: orderNumber,
+        supplierId: order.supplierId, supplierName: order.supplierName,
+        notes: order.notes, source: order.source,
+        items: order.items.map(item => ({ ...item, quantity: item.orderedQuantity })),
+      },
+    });
+  } catch (error) {
+    await updateDoc(doc(db, 'vendors', vendorId, 'purchase_orders', id), { status: 'DRAFT', updatedAt: new Date().toISOString() });
+    throw error;
+  }
+  await logBIEvent(vendorId, 'PURCHASE_ORDER_CREATED', `${order.source} ${order.orderNumber} submitted for approval`, { purchaseOrderId: id, supplierId: order.supplierId, lineCount: order.items.length, total: order.items.reduce((sum, item) => sum + item.orderedQuantity * item.unitCost, 0), inventoryChanged: false }, { staffId: input.requester.id, staffName: input.requester.name, staffRole: input.requester.role });
+  return order;
 }
 
 export async function fetchSupplierPurchaseOrders(
@@ -1721,10 +1822,10 @@ export async function fetchOrders(vendorId: string, branchId?: string): Promise<
 
 // Default Menu Presets by Role
 export const DEFAULT_ROLE_MENUS: Record<StaffRole, AppMenuId[]> = {
-  sysadmin: ['desk', 'pos', 'delivery', 'warehouse', 'transfers', 'branches', 'products', 'financial', 'customers', 'reports', 'approvals', 'staff', 'bi_audit', 'settings', 'billing'],
-  manager: ['desk', 'pos', 'delivery', 'warehouse', 'transfers', 'branches', 'products', 'financial', 'customers', 'reports', 'approvals', 'settings', 'billing'],
+  sysadmin: ['desk', 'pos', 'delivery', 'warehouse', 'transfers', 'branches', 'products', 'stock_matrix', 'managed_stocktake', 'purchase_orders', 'financial', 'customers', 'reports', 'approvals', 'staff', 'bi_audit', 'settings', 'billing'],
+  manager: ['desk', 'pos', 'delivery', 'warehouse', 'transfers', 'branches', 'products', 'stock_matrix', 'managed_stocktake', 'purchase_orders', 'financial', 'customers', 'reports', 'approvals', 'settings', 'billing'],
   cashier: ['desk', 'pos', 'customers', 'reports'],
-  warehouse_staff: ['desk', 'warehouse', 'transfers', 'products', 'approvals'],
+  warehouse_staff: ['desk', 'warehouse', 'transfers', 'products', 'stock_matrix', 'managed_stocktake', 'purchase_orders', 'approvals'],
 };
 
 // Default Starter Staff Members
@@ -1888,6 +1989,8 @@ function approvalTypeForEntity(entityType: CriticalInventoryEntityType): Approva
   if (entityType === 'SUPPLIER_STOCK_RECEIPT') return 'supplier_intake';
   if (entityType === 'WAREHOUSE_TO_BRANCH_TRANSFER' || entityType === 'BRANCH_TO_BRANCH_TRANSFER') return 'stock_transfer';
   if (entityType === 'PURCHASE_ORDER_CANCELLATION') return 'purchase_order_cancellation';
+  if (entityType === 'PURCHASE_ORDER') return 'purchase_order';
+  if (entityType === 'PRODUCT_COST_CHANGE') return 'product_cost_change';
   return 'stock_adjustment';
 }
 
@@ -2149,6 +2252,13 @@ export async function reviewApprovalRequest(
     );
 
     if (decision !== 'APPROVED') {
+      if (current.entityType === 'PURCHASE_ORDER') {
+        transaction.set(doc(db, 'vendors', vendorId, 'purchase_orders', current.entityId), {
+          status: decision === 'REJECTED' ? 'REJECTED' : 'CANCELLED',
+          updatedAt: now,
+          ...(decision === 'REJECTED' ? { rejectedAt: now } : { cancelledAt: now }),
+        }, { merge: true });
+      }
       transaction.set(requestRef, decided);
       const event = auditEventDocument(decided, decision, reviewer, now, decided.reason || '');
       transaction.set(doc(db, 'vendors', vendorId, 'approval_events', event.id), event);
@@ -2158,6 +2268,37 @@ export async function reviewApprovalRequest(
     const processing = markInventoryRequestProcessing(decided, now);
     const payload = current.dataPayload;
     const quantityDecisions: ApprovalQuantityDecision[] = [];
+
+    if (current.entityType === 'PURCHASE_ORDER') {
+      const purchaseOrderRef = doc(db, 'vendors', vendorId, 'purchase_orders', current.entityId);
+      const purchaseOrderSnapshot = await transaction.get(purchaseOrderRef);
+      if (!purchaseOrderSnapshot.exists()) throw new Error('Purchase order not found.');
+      if (String(purchaseOrderSnapshot.data().status) !== 'PENDING_APPROVAL') throw new Error('Only a pending purchase order can be approved.');
+      transaction.set(purchaseOrderRef, { status: 'OPEN', approvedBy: reviewer, approvedAt: now, updatedAt: now }, { merge: true });
+      const completedApproval = { ...markInventoryRequestCompleted(processing, now), quantityDecisions };
+      transaction.set(requestRef, completedApproval);
+      for (const state of [decided, processing, completedApproval]) {
+        const event = auditEventDocument(state, state.status, reviewer, now, state.reason || reason, quantityDecisions);
+        transaction.set(doc(db, 'vendors', vendorId, 'approval_events', event.id), event);
+      }
+      return completedApproval;
+    }
+
+    if (current.entityType === 'PRODUCT_COST_CHANGE') {
+      const productRef = doc(db, 'vendors', vendorId, 'products', current.entityId);
+      const productSnapshot = await transaction.get(productRef);
+      if (!productSnapshot.exists()) throw new Error('Product no longer exists.');
+      const proposedCost = Number(payload.proposedCost);
+      if (!Number.isFinite(proposedCost) || proposedCost < 0) throw new Error('The proposed product cost is invalid.');
+      transaction.set(productRef, { costPrice: proposedCost, updatedAt: now }, { merge: true });
+      const completedApproval = { ...markInventoryRequestCompleted(processing, now), quantityDecisions };
+      transaction.set(requestRef, completedApproval);
+      for (const state of [decided, processing, completedApproval]) {
+        const event = auditEventDocument(state, state.status, reviewer, now, state.reason || reason, quantityDecisions);
+        transaction.set(doc(db, 'vendors', vendorId, 'approval_events', event.id), event);
+      }
+      return completedApproval;
+    }
 
     if (current.entityType === 'WAREHOUSE_TO_BRANCH_TRANSFER') {
       const items = requirePayloadItems(payload);
@@ -2354,7 +2495,7 @@ export async function reviewApprovalRequest(
         throw new Error('Direct supplier receipt into a branch is not permitted.');
       }
       const warehouseRef = doc(db, 'vendors', vendorId, 'warehouses', warehouseId);
-      const productTotals = new Map<string, { productName: string; quantity: number }>();
+      const productTotals = new Map<string, { productName: string; quantity: number; totalCost: number }>();
       const receiptKeys = new Set<string>();
       items.forEach(item => {
         const receiptKey = [
@@ -2371,18 +2512,21 @@ export async function reviewApprovalRequest(
         productTotals.set(item.productId, {
           productName: item.productName,
           quantity: (total?.quantity || 0) + quantity,
+          totalCost: (total?.totalCost || 0) + quantity * Number(item.unitCost || 0),
         });
       });
       const productEntries = [...productTotals.entries()];
       const inventoryRefs = productEntries.map(([productId]) =>
         doc(db, 'vendors', vendorId, 'warehouse_inventory', `${vendorId}_${warehouseId}_${productId}`),
       );
+      const productRefs = productEntries.map(([productId]) => doc(db, 'vendors', vendorId, 'products', productId));
       const purchaseOrderRef = payload.purchaseOrderId
         ? doc(db, 'vendors', vendorId, 'purchase_orders', payload.purchaseOrderId)
         : null;
-      const [warehouseSnapshot, inventorySnapshots, purchaseOrderSnapshot] = await Promise.all([
+      const [warehouseSnapshot, inventorySnapshots, productSnapshots, purchaseOrderSnapshot] = await Promise.all([
         transaction.get(warehouseRef),
         Promise.all(inventoryRefs.map(reference => transaction.get(reference))),
+        Promise.all(productRefs.map(reference => transaction.get(reference))),
         purchaseOrderRef ? transaction.get(purchaseOrderRef) : Promise.resolve(null),
       ]);
       if (!warehouseSnapshot.exists() || !canResourceProcessTransactions(warehouseSnapshot.data() as Warehouse)) {
@@ -2439,12 +2583,15 @@ export async function reviewApprovalRequest(
         const quantity = product.quantity;
         if (quantity <= 0) throw new Error(`Receipt quantity must be positive for ${product.productName}.`);
         const after = before + quantity;
+        const priorAverage = Number(inventorySnapshots[index].data()?.averageUnitCost ?? productSnapshots[index].data()?.costPrice ?? (quantity ? product.totalCost / quantity : 0));
+        const averageUnitCost = weightedAverageCost(before, priorAverage, quantity, product.totalCost);
         transaction.set(inventoryRefs[index], {
           id: inventoryRefs[index].id,
           vendorId,
           warehouseId,
           productId,
           quantity: after,
+          averageUnitCost,
           lastUpdated: now,
         });
         quantityDecisions.push({
@@ -2660,6 +2807,18 @@ export async function reviewApprovalRequest(
     ? ['APPROVED', 'PROCESSING', 'COMPLETED']
     : [decision];
   await logWorkflowTransitions(result, statuses, reviewer, result.reason || reason);
+  if (result.entityType === 'PURCHASE_ORDER') {
+    await logBIEvent(
+      vendorId,
+      decision === 'APPROVED' ? 'PURCHASE_ORDER_APPROVED' : 'PURCHASE_ORDER_REJECTED',
+      `Purchase order ${result.dataPayload.purchaseOrderNumber || result.entityId} ${decision.toLowerCase()}`,
+      { purchaseOrderId: result.entityId, decision, inventoryChanged: false, reason: result.reason || reason },
+      { staffId: reviewer.id, staffName: reviewer.name, staffRole: reviewer.role },
+    );
+  }
+  if (result.entityType === 'PRODUCT_COST_CHANGE' && decision === 'APPROVED') {
+    await logBIEvent(vendorId, 'PRODUCT_PRICE_CHANGED', `Approved cost change for ${String(result.dataPayload.sku || result.entityId)}`, { productId: result.entityId, previousCost: Number(result.dataPayload.previousCost), newCost: Number(result.dataPayload.proposedCost), averageCost: Number(result.dataPayload.averageCost), approvalRequestId: result.id, approved: true }, { staffId: reviewer.id, staffName: reviewer.name, staffRole: reviewer.role });
+  }
   return result;
 }
 

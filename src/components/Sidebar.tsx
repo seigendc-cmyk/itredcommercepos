@@ -6,8 +6,10 @@ import {
   ArrowLeftRight,
   Store,
   Package,
+  TableProperties,
   BarChart3,
   CheckSquare,
+  ClipboardCheck,
   Users,
   BrainCircuit,
   Settings,
@@ -77,6 +79,9 @@ const MENU_GROUPS: MenuCategoryGroup[] = [
       { id: 'warehouse', label: 'Warehouse Hub', icon: <WarehouseIcon className="w-4 h-4" /> },
       { id: 'transfers', label: 'Stock Transfers', icon: <ArrowLeftRight className="w-4 h-4" /> },
       { id: 'products', label: 'Products & Stocktake', icon: <Package className="w-4 h-4" />, badge: 'Cycle Audit' },
+      { id: 'stock_matrix', label: 'Stock by Cost Center', icon: <TableProperties className="w-4 h-4" /> },
+      { id: 'managed_stocktake', label: 'User Managed Stocktake', icon: <ClipboardCheck className="w-4 h-4" /> },
+      { id: 'purchase_orders', label: 'Purchase Orders', icon: <ShoppingCart className="w-4 h-4" />, badge: 'New' },
     ]
   },
   {
@@ -236,7 +241,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <div className="flex-1 overflow-y-auto p-2 space-y-3">
         {MENU_GROUPS.map(group => {
           // Check if staff has permission for at least 1 item in group
-          const visibleItems = group.items.filter(item => activeStaff.grantedMenuIds.includes(item.id));
+          const visibleItems = group.items.filter(item => activeStaff.grantedMenuIds.includes(item.id) || (['stock_matrix', 'managed_stocktake', 'purchase_orders'].includes(item.id) && activeStaff.grantedMenuIds.includes('products')));
           if (visibleItems.length === 0) return null;
 
           const isExpanded = expandedCategoryId === group.id;

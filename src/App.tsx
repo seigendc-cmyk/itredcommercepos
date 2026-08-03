@@ -56,7 +56,9 @@ import {
   fetchCreditSales,
   fetchCreditPayments,
   fetchCollectionActivities
+  ,fetchInventoryCostSnapshots
 } from './services/db';
+import type { InventoryCostSnapshot } from './services/db';
 import { auth } from './lib/firebase';
 import {
   AuthIdentity,
@@ -98,6 +100,9 @@ import { ReceiveSupplierStockModal } from './components/Warehouse/ReceiveSupplie
 import { TransferStockModal } from './components/Warehouse/TransferStockModal';
 import { AddWarehouseModal } from './components/Warehouse/AddWarehouseModal';
 import { StockAdjustmentModal } from './components/Branch/StockAdjustmentModal';
+import { StockCostCenterMatrix } from './components/Inventory/StockCostCenterMatrix';
+import { ManagedStocktakeWorkspace } from './components/Inventory/ManagedStocktakeWorkspace';
+import { PurchaseOrderWorkspace } from './components/Inventory/PurchaseOrderWorkspace';
 import { AddBranchTerminalModal } from './components/Branch/AddBranchTerminalModal';
 import { ProductModal } from './components/Products/ProductModal';
 import { ProductImportModal } from './components/Products/ProductImportModal';
@@ -135,6 +140,7 @@ export default function App() {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [terminals, setTerminals] = useState<Terminal[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [inventoryCosts, setInventoryCosts] = useState<Record<string, InventoryCostSnapshot>>({});
   const [warehouseStock, setWarehouseStock] = useState<Record<string, number>>({});
   const [branchStock, setBranchStock] = useState<Record<string, number>>({});
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -269,12 +275,13 @@ export default function App() {
   // Load initial app data
   const loadAppData = async (vendorId: string, email: string) => {
     try {
-      const whs = await fetchWarehouses(vendorId);
-      const brs = await fetchBranches(vendorId);
-      const terms = await fetchTerminals(vendorId);
-      const prods = await fetchProducts(vendorId);
-
-      await loadCustomerData(vendorId);
+      // Independent collections should not make startup wait on one another.
+      const [whs, brs, terms, prods] = await Promise.all([
+        fetchWarehouses(vendorId),
+        fetchBranches(vendorId),
+        fetchTerminals(vendorId),
+        fetchProducts(vendorId),
+      ]);
 
       setWarehouses(whs);
       setBranches(brs);
@@ -288,18 +295,24 @@ export default function App() {
       setActiveTerminal(defaultTerm);
 
       const defaultWh = whs.find(w => w.isDefault) || whs[0];
-      if (defaultWh) {
-        const whStk = await fetchWarehouseStock(vendorId, defaultWh.id).catch(() => ({}));
-        setWarehouseStock(whStk);
-      }
-
-      if (defaultBr) {
-        const brStk = await fetchBranchStock(vendorId, defaultBr.id).catch(() => ({}));
-        setBranchStock(brStk);
-      }
+      const [whStk, brStk, staff, rcpts, trfs, adjs, ords, appr, bLogs, crs, costSnapshots] = await Promise.all([
+        defaultWh ? fetchWarehouseStock(vendorId, defaultWh.id).catch(() => ({})) : Promise.resolve({}),
+        defaultBr ? fetchBranchStock(vendorId, defaultBr.id).catch(() => ({})) : Promise.resolve({}),
+        fetchStaffMembers(vendorId, email),
+        fetchSupplierReceipts(vendorId).catch(() => []),
+        fetchStockTransfers(vendorId).catch(() => []),
+        fetchStockAdjustments(vendorId).catch(() => []),
+        fetchOrders(vendorId).catch(() => []),
+        fetchApprovalRequests(vendorId).catch(() => []),
+        fetchBILogs(vendorId).catch(() => []),
+        fetchDeliveryCouriers(vendorId).catch(() => []),
+        fetchInventoryCostSnapshots(vendorId).catch(() => ({})),
+        loadCustomerData(vendorId),
+      ]);
+      setWarehouseStock(whStk);
+      setBranchStock(brStk);
 
       // Load Staff Members & set default active staff
-      const staff = await fetchStaffMembers(vendorId, email);
       setStaffList(staff);
       const adminStaff = staff.find(s => s.role === 'sysadmin') || staff[0];
       if (adminStaff) {
@@ -322,15 +335,6 @@ export default function App() {
         setStaffList([fallbackStaff]);
       }
 
-      // Load logs, approvals, and BI events
-      const rcpts = await fetchSupplierReceipts(vendorId).catch(() => []);
-      const trfs = await fetchStockTransfers(vendorId).catch(() => []);
-      const adjs = await fetchStockAdjustments(vendorId).catch(() => []);
-      const ords = await fetchOrders(vendorId).catch(() => []);
-      const appr = await fetchApprovalRequests(vendorId).catch(() => []);
-      const bLogs = await fetchBILogs(vendorId).catch(() => []);
-      const crs = await fetchDeliveryCouriers(vendorId).catch(() => []);
-
       setSupplierReceipts(rcpts);
       setTransfers(trfs);
       setStockAdjustments(adjs);
@@ -338,9 +342,10 @@ export default function App() {
       setApprovalRequests(appr);
       setBiLogs(bLogs);
       setCouriers(crs);
+      setInventoryCosts(costSnapshots);
 
-      // Initial log
-      await logBIEvent(vendorId, 'AUTH_LOGIN', `User session started for ${email}`, { vendorId }).catch(() => {});
+      // Audit logging is non-critical and must not hold the loading screen open.
+      void logBIEvent(vendorId, 'AUTH_LOGIN', `User session started for ${email}`, { vendorId }).catch(() => {});
     } catch (e) {
       console.warn('Error loading app data, enforcing safety fallback staff:', e);
       if (!activeStaff) {
@@ -856,10 +861,24 @@ export default function App() {
       {/* Main Workspace Board */}
       <div className="flex-1 flex flex-col min-w-0">
         <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 bg-slate-50">
+
+        {['warehouse', 'transfers', 'products', 'stock_matrix', 'managed_stocktake', 'purchase_orders'].includes(activeTab) && (
+          <section className="mb-5 border border-orange-200 bg-white p-3 shadow-sm">
+            <div className="mb-2 flex items-center justify-between"><div><b className="text-sm">Inventory Control Center</b><p className="text-[11px] text-slate-500">New purchasing, stocktake, average-cost and regional BI tools</p></div><span className="bg-[#FF6600] px-2 py-1 text-[10px] font-black text-white">UPDATED</span></div>
+            <div className="flex flex-wrap gap-2 text-xs font-bold">
+              <button onClick={() => setActiveTab('products')} className="border px-3 py-2">Product Catalog & Average Cost</button>
+              <button onClick={() => setActiveTab('stock_matrix')} className="border px-3 py-2">Stock by Cost Center</button>
+              <button onClick={() => setActiveTab('managed_stocktake')} className="border px-3 py-2">Managed Stocktake</button>
+              <button onClick={() => setActiveTab('purchase_orders')} className="bg-[#FF6600] px-3 py-2 text-white">Purchase Orders · New</button>
+              {activeStaff.grantedMenuIds.includes('approvals') && <button onClick={() => setActiveTab('approvals')} className="border px-3 py-2">Management Approvals ({pendingApprovalsCount})</button>}
+              {activeStaff.grantedMenuIds.includes('bi_audit') && <button onClick={() => setActiveTab('bi_audit')} className="border border-slate-800 bg-slate-800 px-3 py-2 text-white">Inventory & Regional BI</button>}
+            </div>
+          </section>
+        )}
         
         {/* Desk View */}
         {activeTab === 'desk' && (
-          <><StockActionDesk vendorId={vendor.id} staff={activeStaff} products={products} warehouses={warehouses} branches={branches} warehouseStock={warehouseStock} branchStock={branchStock} onNavigate={(tab) => setActiveTab(tab as AppMenuId)} onLogBIEvent={(eventType, details) => logBIEvent(vendor.id, eventType, eventType.replaceAll('_', ' ').toLowerCase(), details, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role })} /><StaffDesk
+          <><StockActionDesk vendorId={vendor.id} staff={activeStaff} staffList={staffList} products={products} warehouses={warehouses} branches={branches} warehouseStock={warehouseStock} branchStock={branchStock} onNavigate={(tab) => setActiveTab(tab as AppMenuId)} onLogBIEvent={(eventType, details) => logBIEvent(vendor.id, eventType, eventType.replaceAll('_', ' ').toLowerCase(), details, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role })} /><StaffDesk
             staff={activeStaff}
             activeBranch={activeBranch}
             activeTerminal={activeTerminal}
@@ -968,6 +987,7 @@ export default function App() {
             vendorId={vendor.id}
             businessName={vendor.businessName}
             approvalRequests={approvalRequests}
+            inventoryCosts={inventoryCosts}
             onOpenAddProductModal={() => {
               setProductToEdit(null);
               setIsProductModalOpen(true);
@@ -989,12 +1009,55 @@ export default function App() {
               if (!confirm(`${outcome} ${product.sku} · ${product.name}?\n\nStock by location:\n${stock}\n\nHistory: ${usage.references.join(', ') || 'None'}`)) return;
               await archiveOrDeleteProduct(vendor.id, product, { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role }); await refreshAllData();
             }}
+            onArchiveProducts={async selectedProducts => {
+              if (!activeStaff || !selectedProducts.length) return;
+              const preview = selectedProducts.slice(0, 8).map(product => `${product.sku} · ${product.name}`).join('\n');
+              const remaining = selectedProducts.length > 8 ? `\n…and ${selectedProducts.length - 8} more` : '';
+              if (!confirm(`Delete ${selectedProducts.length} selected product${selectedProducts.length === 1 ? '' : 's'}?\n\n${preview}${remaining}\n\nUnused products will be deleted permanently. Products with stock or transaction history will be archived to preserve audit records.`)) return;
+              const actor = { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role };
+              try {
+                // Keep bulk removal responsive without overwhelming Firestore.
+                for (let index = 0; index < selectedProducts.length; index += 4) {
+                  await Promise.all(selectedProducts.slice(index, index + 4).map(product => archiveOrDeleteProduct(vendor.id, product, actor)));
+                }
+              } finally {
+                await refreshAllData();
+              }
+            }}
             onRestoreProduct={async product => { if (!activeStaff || !confirm(`Restore ${product.sku} · ${product.name}?`)) return; await restoreProduct(vendor.id, product, { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role }); await refreshAllData(); }}
             onTemplateExport={format => logBIEvent(vendor.id, 'PRODUCT_IMPORT_TEMPLATE_EXPORTED', `Product import ${format} template exported`, { outcome: 'completed', format }, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role })}
             onSubmitStocktakeApproval={handleSubmitStocktakeApproval}
             onNavigateToApprovals={() => setActiveTab('approvals')}
             onLogBIEvent={(eventType, details) => logBIEvent(vendor.id, eventType, eventType.replaceAll('_', ' ').toLowerCase(), details, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role })}
           />
+        )}
+
+        {activeTab === 'stock_matrix' && (activeStaff.grantedMenuIds.includes('stock_matrix') || activeStaff.grantedMenuIds.includes('products')) && (
+          <StockCostCenterMatrix
+            vendorId={vendor.id}
+            products={products}
+            warehouses={warehouses}
+            branches={branches}
+          />
+        )}
+
+        {activeTab === 'managed_stocktake' && (activeStaff.grantedMenuIds.includes('managed_stocktake') || activeStaff.grantedMenuIds.includes('products')) && (
+          <ManagedStocktakeWorkspace
+            vendorId={vendor.id}
+            businessName={vendor.businessName}
+            currency={vendor.currency}
+            products={products}
+            warehouses={warehouses}
+            branches={branches}
+            activeStaff={activeStaff}
+            onSubmit={handleSubmitStocktakeApproval}
+            onNavigateToApprovals={() => setActiveTab('approvals')}
+            onLogBIEvent={(eventType, details) => logBIEvent(vendor.id, eventType, eventType.replaceAll('_', ' ').toLowerCase(), details, { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role })}
+          />
+        )}
+
+        {activeTab === 'purchase_orders' && (activeStaff.grantedMenuIds.includes('purchase_orders') || activeStaff.grantedMenuIds.includes('products')) && (
+          <PurchaseOrderWorkspace vendorId={vendor.id} businessName={vendor.businessName} currency={vendor.currency || '$'} products={products} activeStaff={activeStaff} onChanged={refreshAllData} />
         )}
 
         {/* Sales & Reports */}
@@ -1050,6 +1113,8 @@ export default function App() {
             warehouseStock={warehouseStock}
             branchStock={branchStock}
             currency={vendor.currency || '$'}
+            inventoryCosts={inventoryCosts}
+            orders={orders}
           />
         )}
 
@@ -1129,6 +1194,7 @@ export default function App() {
         activeBranchId={activeBranch?.id}
         products={products.filter(product => product.status !== 'archived')}
         branchStock={branchStock}
+        averageCost={productToEdit ? inventoryCosts[productToEdit.id]?.averageUnitCost : undefined}
         activeStaff={activeStaff}
         onSuccess={refreshAllData}
       />

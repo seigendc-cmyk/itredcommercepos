@@ -3,6 +3,7 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { StocktakeWorkspace } from '../../components/Inventory/StocktakeWorkspace';
+import { ManagedStocktakeWorkspace } from '../../components/Inventory/ManagedStocktakeWorkspace';
 import { Product, StaffMember, Warehouse } from '../../types';
 import {
   buildCycleCountSchedule,
@@ -70,6 +71,13 @@ function scheduleProducts() {
 
 test.beforeEach(() => {
   Object.defineProperty(globalThis, 'localStorage', { value: new MemoryStorage(), configurable: true });
+});
+
+test('user managed stocktake exposes controlled product count and adjustment workflow', () => {
+  const html = renderToStaticMarkup(<ManagedStocktakeWorkspace vendorId="vendor-1" businessName="Test Vendor" currency="$" products={[product('a', 'Shelf 01')]} warehouses={[warehouse]} branches={[]} activeStaff={staff} onSubmit={async () => {}} />);
+  for (const label of ['User Managed Stocktake', 'Physical Count', 'Stock Location', 'Reference', 'Add All Filtered', 'Add Selected', 'SKU', 'Product Name', 'Category', 'Shelf No.', 'Sys Qty', 'Physical Qty', 'Qty Variance', 'Move 0 Variance Items to Stock Adjustment']) assert.ok(html.includes(label), label);
+  assert.ok(html.includes('aria-label="Select stocktake products"'));
+  assert.ok(html.includes('aria-label="Filter by shelf number"'));
 });
 
 test('working-day selection resolves explicit shelves and only assigned active inventory products', () => {

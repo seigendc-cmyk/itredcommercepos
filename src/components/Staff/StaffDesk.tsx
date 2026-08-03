@@ -18,7 +18,9 @@ import {
   Truck,
   Settings,
   CreditCard,
-  Landmark
+  Landmark,
+  TableProperties,
+  ClipboardCheck
 } from 'lucide-react';
 
 interface StaffDeskProps {
@@ -37,6 +39,9 @@ const MENU_DEFINITIONS: Record<AppMenuId, AppMenuDefinition> = {
   transfers: { id: 'transfers', label: 'Stock Transfers', description: 'Inter-branch stock movement logs', category: 'inventory' },
   branches: { id: 'branches', label: 'Branches & Terminals', description: 'Multi-store location & terminal config', category: 'management' },
   products: { id: 'products', label: 'Products Catalog', description: 'Master catalog & pricing setup', category: 'inventory' },
+  stock_matrix: { id: 'stock_matrix', label: 'Stock by Cost Center', description: 'Warehouse and branch stock in one matrix', category: 'inventory' },
+  managed_stocktake: { id: 'managed_stocktake', label: 'User Managed Stocktake', description: 'Select products and submit physical count adjustments', category: 'inventory' },
+  purchase_orders: { id: 'purchase_orders', label: 'Purchase Orders', description: 'Plan and monitor supplier purchase orders', category: 'inventory' },
   customers: { id: 'customers', label: 'Customers', description: 'Customer profiles, accounts and purchase activity', category: 'management' },
   financial: { id: 'financial', label: 'Financial & Check Writer', description: 'Chart of accounts, protected COGS reserves & check writer', category: 'management' },
   reports: { id: 'reports', label: 'Sales & Reports', description: 'Financial analytics & order audits', category: 'management' },
@@ -55,6 +60,9 @@ const MENU_ICONS: Record<AppMenuId, React.ReactNode> = {
   transfers: <ArrowLeftRight className="w-5 h-5 text-[#FF6B00]" />,
   branches: <Store className="w-5 h-5 text-[#FF6B00]" />,
   products: <Package className="w-5 h-5 text-[#FF6B00]" />,
+  stock_matrix: <TableProperties className="w-5 h-5 text-[#FF6B00]" />,
+  managed_stocktake: <ClipboardCheck className="w-5 h-5 text-[#FF6B00]" />,
+  purchase_orders: <ShoppingCart className="w-5 h-5 text-[#FF6B00]" />,
   customers: <Users className="w-5 h-5 text-[#FF6B00]" />,
   financial: <Landmark className="w-5 h-5 text-[#FF6B00]" />,
   reports: <BarChart3 className="w-5 h-5 text-[#FF6B00]" />,

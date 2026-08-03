@@ -1,14 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, ExternalLink, ShieldAlert } from 'lucide-react';
 import { Branch, Product, ProductSector, ProductSectorAttributes, ProductType, StaffMember, TaxOption, Warehouse } from '../../types';
-import { inspectProductUsage, saveProduct } from '../../services/db';
+import { inspectProductUsage, requestBelowAverageCostChange, saveProduct } from '../../services/db';
 import { BOOLEAN_SECTOR_FIELDS, effectiveProductTaxRate, hasExtendedProductPermission, PRODUCT_SECTORS, sanitizeSectorAttributes, SECTOR_ATTRIBUTE_FIELDS, TAX_OPTIONS, validateHsCode, ProductDuplicateError, ProductDuplicateMatch } from '../../features/products';
 import { Modal } from '../Common/Modal';
+import { requiresBelowAverageCostApproval } from '../../features/inventory/averageCost';
 
 interface ProductModalProps {
   isOpen: boolean; onClose: () => void; vendorId: string; vendorTaxRate: number; vendorDefaultSector?: string;
   productToEdit?: Product | null; products: Product[]; warehouses: Warehouse[]; branches: Branch[]; activeStaff: StaffMember;
   warehouseStock: Record<string, number>; branchStock: Record<string, number>;
+  averageCost?: number;
   onSuccess: () => void; onUseExistingProduct?: (product: Product) => void; onOpenStockAdjustment?: (product: Product) => void;
   onOpeningBalanceRequest: (product: Product, quantity: number, location: { id: string; name: string; type: 'warehouse' | 'branch' }, idempotencyKey: string) => Promise<void>;
 }
@@ -18,9 +20,10 @@ interface FormState {
   costPrice: string; sellingPrice: string; quantity: string; location: string; shelfCode: string; binCode: string; unitOfMeasure: string;
   size: string; alternativeLookupCode: string; hsCode: string; taxOption: TaxOption; reorderLevel: string; primarySupplierName: string;
   brand: string; manufacturer: string; status: 'active' | 'archived'; sectorAttributes: ProductSectorAttributes;
+  branchPrices: Record<string, string>;
 }
 
-const emptyForm = (defaultSector: ProductSector): FormState => ({ productType: 'INVENTORY', sector: defaultSector, category: '', name: '', sku: '', barcode: '', description: '', costPrice: '', sellingPrice: '', quantity: '', location: '', shelfCode: '', binCode: '', unitOfMeasure: '', size: '', alternativeLookupCode: '', hsCode: '', taxOption: 'STANDARD_RATED', reorderLevel: '0', primarySupplierName: '', brand: '', manufacturer: '', status: 'active', sectorAttributes: {} });
+const emptyForm = (defaultSector: ProductSector): FormState => ({ productType: 'INVENTORY', sector: defaultSector, category: '', name: '', sku: '', barcode: '', description: '', costPrice: '', sellingPrice: '', quantity: '', location: '', shelfCode: '', binCode: '', unitOfMeasure: '', size: '', alternativeLookupCode: '', hsCode: '', taxOption: 'STANDARD_RATED', reorderLevel: '0', primarySupplierName: '', brand: '', manufacturer: '', status: 'active', sectorAttributes: {}, branchPrices: {} });
 const labelFor = (value: string) => value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/(^|\s)\S/g, letter => letter.toUpperCase());
 
 export const ProductModal: React.FC<ProductModalProps> = props => {
@@ -39,7 +42,7 @@ export const ProductModal: React.FC<ProductModalProps> = props => {
       barcode: product.barcode || '', description: product.description || '', costPrice: String(product.costPrice), sellingPrice: String(product.sellingPrice), quantity: '',
       location: product.location || '', shelfCode: product.shelfCode || product.shelf || '', binCode: product.binCode || product.bin || '', unitOfMeasure: product.unitOfMeasure || product.unit || '',
       size: product.size || '', alternativeLookupCode: product.alternativeLookupCode || '', hsCode: product.hsCode || '', taxOption: product.taxOption || 'STANDARD_RATED', reorderLevel: String(product.reorderLevel),
-      primarySupplierName: product.primarySupplierName || '', brand: product.brand || '', manufacturer: product.manufacturer || '', status: product.status || 'active', sectorAttributes: product.sectorAttributes || {},
+      primarySupplierName: product.primarySupplierName || '', brand: product.brand || '', manufacturer: product.manufacturer || '', status: product.status || 'active', sectorAttributes: product.sectorAttributes || {}, branchPrices: Object.fromEntries(Object.entries(product.branchPrices || {}).map(([branchId, price]) => [branchId, String(price)])),
     } : emptyForm(defaultSector));
     setSectorOpen(Boolean(product && Object.keys(product.sectorAttributes || {}).length) || Boolean(product?.sector && product.sector !== 'GENERAL'));
     setError(''); setDuplicateMatches([]); setDuplicateReason(''); setHasHistory(false);
@@ -55,10 +58,20 @@ export const ProductModal: React.FC<ProductModalProps> = props => {
     const hsError = validateHsCode(form.hsCode); if (hsError) throw new Error(hsError);
     const quantity = form.quantity.trim() === '' ? 0 : Number(form.quantity);
     if (!Number.isFinite(quantity) || quantity < 0) throw new Error('Opening Quantity must be blank, zero or a positive number.');
+    const branchPriceEntries = Object.entries(form.branchPrices) as [string, string][];
+    const invalidBranchPrice = branchPriceEntries.find(([, value]) => value.trim() !== '' && (!Number.isFinite(Number(value)) || Number(value) < 0));
+    if (invalidBranchPrice) throw new Error('Branch price overrides must be zero or positive numbers.');
     if (quantity > 0 && (!selectedLocation || isService || !['INVENTORY', 'BOM'].includes(form.productType))) throw new Error('A valid stock location is required for a positive opening Quantity on an inventory-capable product.');
+    const proposedCost = Number(form.costPrice || 0);
+    if (props.productToEdit && requiresBelowAverageCostApproval(proposedCost, props.averageCost || 0) && proposedCost !== props.productToEdit.costPrice) {
+      await requestBelowAverageCostChange(props.vendorId, props.productToEdit, proposedCost, props.averageCost, { id: props.activeStaff.id, name: props.activeStaff.name, role: props.activeStaff.role });
+      await props.onSuccess(); props.onClose();
+      alert(`Cost change sent to management because ${proposedCost.toFixed(2)} is below average stock cost ${props.averageCost.toFixed(2)}. The current cost remains unchanged until approval.`);
+      return;
+    }
     const product = await saveProduct(props.vendorId, {
       id: props.productToEdit?.id, createdAt: props.productToEdit?.createdAt, productType: form.productType, sector: form.sector, category: form.category.trim(), name: form.name.trim(), sku: form.sku.trim(), barcode: form.barcode.trim() || undefined,
-      description: form.description.trim(), costPrice: Number(form.costPrice || 0), sellingPrice: Number(form.sellingPrice || 0), location: isService ? undefined : selectedLocation?.code,
+      description: form.description.trim(), costPrice: Number(form.costPrice || 0), sellingPrice: Number(form.sellingPrice || 0), branchPrices: Object.fromEntries(branchPriceEntries.filter(([, price]) => price.trim() !== '').map(([branchId, price]) => [branchId, Number(price)])), location: isService ? undefined : selectedLocation?.code,
       shelfCode: isService ? undefined : form.shelfCode.trim() || undefined, binCode: isService ? undefined : form.binCode.trim() || undefined, unitOfMeasure: form.unitOfMeasure.trim(), unit: form.unitOfMeasure.trim(), size: form.size.trim() || undefined,
       alternativeLookupCode: form.alternativeLookupCode.trim() || undefined, hsCode: form.hsCode, taxOption: form.taxOption, applicableTaxRate: effectiveProductTaxRate(form.taxOption, props.vendorTaxRate), reorderLevel: Number(form.reorderLevel || 0),
       primarySupplierName: form.primarySupplierName.trim() || undefined, brand: form.brand.trim() || undefined, manufacturer: form.manufacturer.trim() || undefined,
@@ -83,7 +96,7 @@ export const ProductModal: React.FC<ProductModalProps> = props => {
         <Input label="SKU" required value={form.sku} onChange={value => update('sku', value)} /><Input label="Barcode / EAN" value={form.barcode} onChange={value => update('barcode', value)} />
         <label className="sm:col-span-2"><span className="block text-xs font-black mb-1">Description</span><textarea aria-label="Description" value={form.description} onChange={event => update('description', event.target.value)} className={fieldClass} /></label>
       </div></Section>
-      <Section title="Pricing"><div className="grid sm:grid-cols-2 gap-4"><Input label="Supplier Cost Price" type="number" value={form.costPrice} onChange={value => update('costPrice', value)} /><Input label="Retail Selling Price" type="number" value={form.sellingPrice} onChange={value => update('sellingPrice', value)} /></div></Section>
+      <Section title="Pricing"><div className="grid sm:grid-cols-2 gap-4"><div><Input label="Supplier Cost Price" type="number" value={form.costPrice} onChange={value => update('costPrice', value)} />{props.productToEdit && <p className={`mt-1 text-xs font-bold ${Number(form.costPrice) < (props.averageCost || 0) ? 'text-red-600' : 'text-slate-500'}`}>Average cost in stock: {(props.averageCost ?? props.productToEdit.costPrice).toFixed(2)}{Number(form.costPrice) < (props.averageCost || 0) ? ' · Management approval required' : ''}</p>}</div><Input label="Base Retail Selling Price" type="number" value={form.sellingPrice} onChange={value => update('sellingPrice', value)} /></div>{props.branches.length > 0 && <div className="mt-4 border-t pt-3"><h4 className="text-xs font-black">Optional Branch Price Overrides</h4><p className="text-xs text-slate-500 mb-3">Leave blank to use the base retail price.</p><div className="grid sm:grid-cols-2 gap-3">{props.branches.map(branch => <Input key={branch.id} label={`${branch.code} · ${branch.name}`} type="number" value={form.branchPrices[branch.id] || ''} onChange={value => update('branchPrices', { ...form.branchPrices, [branch.id]: value })} />)}</div></div>}</Section>
       <Section title="Inventory Setup"><div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {!isService && !props.productToEdit && <Input label="Quantity — Optional" type="number" value={form.quantity} onChange={value => update('quantity', value)} />}
         {!isService && <label><span className="block text-xs font-black mb-1">Stock Location</span><select aria-label="Stock Location" value={form.location} onChange={event => update('location', event.target.value)} className={fieldClass}><option value="">Select location</option>{locations.map(location => <option key={`${location.type}:${location.id}`} value={`${location.type}:${location.id}`}>{location.type === 'warehouse' ? 'Warehouse' : 'Branch'} · {location.code} · {location.name}</option>)}</select></label>}

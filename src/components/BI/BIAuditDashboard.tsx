@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { BIEvent, BIInsight, BIAggregates } from '../../bi/types';
-import { Product, Warehouse, Branch } from '../../types';
+import { Product, Warehouse, Branch, Order } from '../../types';
+import type { InventoryCostSnapshot } from '../../services/db';
 import { 
   BrainCircuit, 
   Activity, 
@@ -34,6 +35,8 @@ interface BIAuditDashboardProps {
   warehouseStock?: Record<string, number>;
   branchStock?: Record<string, number>;
   currency?: string;
+  inventoryCosts?: Record<string, InventoryCostSnapshot>;
+  orders?: Order[];
 }
 
 export function BIAuditDashboard({ 
@@ -45,13 +48,24 @@ export function BIAuditDashboard({
   branches = [],
   warehouseStock = {},
   branchStock = {},
-  currency = '$'
+  currency = '$', inventoryCosts = {}, orders = []
 }: BIAuditDashboardProps) {
   const [activeSubTab, setActiveSubTab] = useState<'inventory_bi' | 'audit_logs' | 'insights'>('inventory_bi');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedType, setSelectedType] = useState<string>('ALL');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [showLowStockOnly, setShowLowStockOnly] = useState(false);
+  const [periodDays, setPeriodDays] = useState(30);
+  const periodStart = Date.now() - periodDays * 86400000;
+  const periodOrders = orders.filter(order => new Date(order.createdAt).getTime() >= periodStart && order.status === 'completed');
+  const regionFor = (branchId: string) => {
+    const branch = branches.find(item => item.id === branchId); const address = branch?.address?.trim();
+    if (!address) return 'Unclassified'; const parts = address.split(',').map(value => value.trim()).filter(Boolean); return parts.at(-2) || parts.at(-1) || 'Unclassified';
+  };
+  const regionalDemand = Object.values(periodOrders.reduce<Record<string, { region: string; units: number; revenue: number; orders: number }>>((map, order) => { const region = regionFor(order.branchId); const row = map[region] || { region, units: 0, revenue: 0, orders: 0 }; row.orders += 1; row.revenue += order.totalAmount; row.units += order.items.reduce((sum, item) => sum + item.quantity, 0); map[region] = row; return map; }, {})).sort((a,b)=>b.units-a.units);
+  const movementEvents = logs.filter(log => new Date(log.timestamp).getTime() >= periodStart && ['SUPPLY_RECEIPT','STOCK_TRANSFER','STOCK_ADJUSTMENT','POS_TRANSACTION','INVENTORY_WORKFLOW_TRANSITION'].includes(log.eventType));
+  const priceChanges = logs.filter(log => log.eventType === 'PRODUCT_PRICE_CHANGED' && new Date(log.timestamp).getTime() >= periodStart);
+  const regionalPriceRows = products.flatMap(product => Object.entries(product.branchPrices || {}).map(([branchId, price]) => ({ product, branch: branches.find(item=>item.id===branchId), region: regionFor(branchId), price }))).sort((a,b)=>a.region.localeCompare(b.region));
 
   // Filter BI Audit Logs
   const filteredLogs = logs.filter(log => {
@@ -89,7 +103,7 @@ export function BIAuditDashboard({
   const totalValuationCost = products.reduce((acc, p) => {
     const wQty = warehouseStock[p.id] || 0;
     const bQty = branchStock[p.id] || 0;
-    return acc + (p.costPrice * (wQty + bQty));
+    return acc + (inventoryCosts[p.id]?.stockValue ?? p.costPrice * (wQty + bQty));
   }, 0);
 
   const totalWarehouseQty = products.reduce((acc, p) => acc + (warehouseStock[p.id] || 0), 0);
@@ -189,6 +203,16 @@ export function BIAuditDashboard({
       {/* SECTION 1: INVENTORY BI TABLE */}
       {activeSubTab === 'inventory_bi' && (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-orange-200 bg-orange-50 p-3"><div><b className="text-sm">Inventory movement and regional pricing period</b><p className="text-xs text-slate-600">Regions are derived only from configured branch addresses inside the vendor's country; incomplete addresses remain Unclassified.</p></div><select value={periodDays} onChange={event=>setPeriodDays(Number(event.target.value))} className="border bg-white px-3 py-2 text-xs font-bold"><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option><option value={365}>Last 12 months</option></select></div>
+          <div className="grid gap-3 lg:grid-cols-3">
+            <article className="rounded-lg border p-3"><h3 className="font-black text-sm">Movements over time</h3><p className="mt-1 text-2xl font-black text-[#FF6600]">{movementEvents.length}</p><p className="text-xs text-slate-500">Audited receipts, transfers, adjustments and sales events</p></article>
+            <article className="rounded-lg border p-3"><h3 className="font-black text-sm">Product price changes</h3><p className="mt-1 text-2xl font-black text-[#FF6600]">{priceChanges.length}</p><p className="text-xs text-slate-500">Cost, base selling and branch override changes</p></article>
+            <article className="rounded-lg border p-3"><h3 className="font-black text-sm">Regional demand coverage</h3><p className="mt-1 text-2xl font-black text-[#FF6600]">{regionalDemand.length}</p><p className="text-xs text-slate-500">Configured regions with completed sales</p></article>
+          </div>
+          <div className="grid gap-4 xl:grid-cols-2">
+            <div className="overflow-x-auto rounded-lg border"><table className="w-full min-w-[520px] text-xs"><thead className="bg-slate-800 text-white"><tr><th className="p-2 text-left">Region / town</th><th>Orders</th><th>Units demanded</th><th>Revenue</th></tr></thead><tbody>{regionalDemand.map(row=><tr key={row.region} className="border-t"><td className="p-2 font-bold">{row.region}</td><td className="text-center">{row.orders}</td><td className="text-center">{row.units}</td><td className="text-right p-2">{currency}{row.revenue.toFixed(2)}</td></tr>)}{!regionalDemand.length&&<tr><td colSpan={4} className="p-5 text-center text-slate-500">No regional demand in this period.</td></tr>}</tbody></table></div>
+            <div className="overflow-x-auto rounded-lg border"><table className="w-full min-w-[620px] text-xs"><thead className="bg-slate-800 text-white"><tr><th className="p-2 text-left">Region / branch</th><th className="text-left">SKU / product</th><th>Base price</th><th>Regional price</th><th>Variation</th></tr></thead><tbody>{regionalPriceRows.slice(0,100).map(row=><tr key={`${row.product.id}-${row.branch?.id}`} className="border-t"><td className="p-2">{row.region} · {row.branch?.name||'Unknown branch'}</td><td>{row.product.sku} · {row.product.name}</td><td className="text-right">{currency}{row.product.sellingPrice.toFixed(2)}</td><td className="text-right">{currency}{row.price.toFixed(2)}</td><td className="p-2 text-right font-bold">{row.product.sellingPrice ? (((row.price-row.product.sellingPrice)/row.product.sellingPrice)*100).toFixed(1) : '0.0'}%</td></tr>)}{!regionalPriceRows.length&&<tr><td colSpan={5} className="p-5 text-center text-slate-500">No branch price variations configured.</td></tr>}</tbody></table></div>
+          </div>
           
           {/* Section Header & Filters */}
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-gray-100">
@@ -256,7 +280,7 @@ export function BIAuditDashboard({
                   <th className="py-3 px-3">Shelf</th>
                   <th className="py-3 px-3 text-center">Warehouse QTY</th>
                   <th className="py-3 px-3 text-center">Branches QTY</th>
-                  <th className="py-3 px-3 text-right">Cost Price</th>
+                  <th className="py-3 px-3 text-right">Average Stock Cost</th>
                   <th className="py-3 px-3 text-right">Price by Branch</th>
                 </tr>
               </thead>
@@ -338,9 +362,9 @@ export function BIAuditDashboard({
 
                       {/* Cost */}
                       <td className="py-3 px-3 text-right font-mono font-bold text-gray-700 whitespace-nowrap">
-                        <div>{currency}{product.costPrice.toFixed(2)}</div>
+                        <div>{currency}{(inventoryCosts[product.id]?.averageUnitCost ?? product.costPrice).toFixed(2)}</div>
                         <div className="text-[10px] text-gray-400 font-normal">
-                          Total: {currency}{(product.costPrice * totalQty).toFixed(2)}
+                          Total: {currency}{(inventoryCosts[product.id]?.stockValue ?? product.costPrice * totalQty).toFixed(2)}
                         </div>
                       </td>
 

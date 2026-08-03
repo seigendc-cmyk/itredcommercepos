@@ -154,6 +154,8 @@ export interface Product {
   size?: string;
   costPrice: number;
   sellingPrice: number;
+  /** Optional retail-price overrides keyed by branch id; base sellingPrice remains the fallback. */
+  branchPrices?: Record<string, number>;
   barcode?: string;
   alternativeLookupCode?: string;
   productType?: ProductType;
@@ -211,6 +213,8 @@ export interface Supplier {
 
 export type PurchaseOrderStatus =
   | 'DRAFT'
+  | 'PENDING_APPROVAL'
+  | 'REJECTED'
   | 'OPEN'
   | 'PARTIALLY_RECEIVED'
   | 'COMPLETED'
@@ -234,6 +238,12 @@ export interface PurchaseOrder {
   supplierName: string;
   orderNumber: string;
   status: PurchaseOrderStatus;
+  source?: 'PLANNED' | 'BI_RECOMMENDATION';
+  notes?: string;
+  requestedBy?: WorkflowActor;
+  approvedBy?: WorkflowActor;
+  approvedAt?: string;
+  rejectedAt?: string;
   items: PurchaseOrderItem[];
   createdAt: string;
   updatedAt?: string;
@@ -258,6 +268,7 @@ export interface WarehouseInventory {
   warehouseId: string;
   productId: string;
   quantity: number;
+  averageUnitCost?: number;
   lastUpdated: string;
 }
 
@@ -267,6 +278,7 @@ export interface BranchInventory {
   branchId: string;
   productId: string;
   quantity: number;
+  averageUnitCost?: number;
   lastUpdated: string;
 }
 
@@ -450,6 +462,9 @@ export type AppMenuId =
   | 'transfers' 
   | 'branches' 
   | 'products' 
+  | 'stock_matrix'
+  | 'managed_stocktake'
+  | 'purchase_orders'
   | 'financial'
   | 'customers'
   | 'reports' 
@@ -561,6 +576,8 @@ export type ApprovalRequestType =
   | 'supplier_intake' 
   | 'stock_transfer' 
   | 'purchase_order_cancellation'
+  | 'purchase_order'
+  | 'product_cost_change'
   | 'large_discount' 
   | 'order_refund';
 
@@ -568,6 +585,8 @@ export type CriticalInventoryEntityType =
   | 'WAREHOUSE_TO_BRANCH_TRANSFER'
   | 'BRANCH_TO_BRANCH_TRANSFER'
   | 'SUPPLIER_STOCK_RECEIPT'
+  | 'PURCHASE_ORDER'
+  | 'PRODUCT_COST_CHANGE'
   | 'PURCHASE_ORDER_CANCELLATION'
   | 'OPENING_BALANCE_ADJUSTMENT'
   | 'STOCKTAKE_ADJUSTMENT';

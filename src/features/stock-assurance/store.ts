@@ -6,7 +6,9 @@ const sessionsKey = (vendorId: string) => `itred_targeted_counts_${vendorId}`;
 export function loadStockIncidents(vendorId: string, actorId: string, role: StaffRole): StockActionIncident[] {
   assertStockActionPermission(role, 'stock.notifications.receive');
   const list: StockActionIncident[] = JSON.parse(localStorage.getItem(incidentsKey(vendorId)) || '[]');
-  return role === 'warehouse_staff' ? list.filter(incident => !incident.assignedUserId || incident.assignedUserId === actorId) : list;
+  return role === 'warehouse_staff'
+    ? list.filter(incident => incident.assignedUserId === actorId && ['ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS', 'AWAITING_REVIEW', 'APPROVED'].includes(incident.status))
+    : list;
 }
 export function saveStockIncidents(vendorId: string, incidents: StockActionIncident[]): void { localStorage.setItem(incidentsKey(vendorId), JSON.stringify(incidents)); }
 export function recordStockIncident(vendorId: string, input: StockIncidentInput, role: StaffRole): { incident: StockActionIncident; created: boolean } {

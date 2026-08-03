@@ -18,6 +18,14 @@ export function normalizeSearchText(value: unknown): string {
   return String(value ?? '').toLowerCase().replace(/([a-z])([0-9])/g, '$1 $2').replace(/([0-9])([a-z])/g, '$1 $2').replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
 }
 export function tokenizeSearch(value: unknown): string[] { return normalizeSearchText(value).split(' ').filter(token => token.length > 0); }
+export function matchesPredictiveSearch(query: unknown, ...values: unknown[]): boolean {
+  const tokens = tokenizeSearch(query);
+  if (!tokens.length) return true;
+  const document = values.map(normalizeSearchText).join(' ');
+  const compactDocument = document.replace(/\s+/g, '');
+  const compactQuery = normalizeSearchText(query).replace(/\s+/g, '');
+  return tokens.every(token => document.includes(token)) || compactDocument.includes(compactQuery);
+}
 
 function sectorStrings(product: Product): string[] {
   return Object.values(product.sectorAttributes || {}).filter(value => typeof value === 'string') as string[];
@@ -41,7 +49,7 @@ export function searchCatalogProducts(contexts: ProductCatalogContext[], query: 
     const product = context.product;
     const fields = searchableFields(context).map(normalizeSearchText);
     const document = fields.join(' ');
-    const allTokensMatch = queryTokens.every(token => document.includes(token));
+    const allTokensMatch = matchesPredictiveSearch(query, ...fields);
     const name = normalizeSearchText(product.name);
     const sku = normalizeSearchText(product.sku); const barcode = normalizeSearchText(product.barcode); const alu = normalizeSearchText(product.alternativeLookupCode);
     let score = 0; let matchType: ProductSearchResult['matchType'] = 'STRONG';

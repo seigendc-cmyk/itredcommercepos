@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { acknowledgeStockIncident, assignStockIncident, closeStockIncident, createOrUpdateStockIncident, reconcileTargetedCount, startTargetedCount, StockIncidentInput } from '.';
+import { acknowledgeStockIncident, approveAndAssignStockIncident, assignStockIncident, closeStockIncident, createOrUpdateStockIncident, reconcileTargetedCount, rejectStockIncident, startTargetedCount, StockIncidentInput } from '.';
 
 const input = (evidenceId: string, severity: 'MEDIUM' | 'HIGH' = 'MEDIUM'): StockIncidentInput => ({
   tenantId: 'vendor', vendorId: 'vendor', stockLocationId: 'warehouse', stockLocationName: 'Main Warehouse', productId: 'product', productName: 'Widget',
@@ -19,7 +19,10 @@ test('recommendations deduplicate open incidents, append evidence and escalate s
 test('stock action permissions are enforced and closure requires an outcome', () => {
   const incident = createOrUpdateStockIncident([], input('one')).incident;
   assert.throws(() => assignStockIncident(incident, 'warehouse_staff', { id: 'u', name: 'User' }, undefined, input('x').now), /Permission denied/);
-  assert.equal(assignStockIncident(incident, 'manager', { id: 'u', name: 'User' }, undefined, input('x').now).status, 'ASSIGNED');
+  assert.throws(() => assignStockIncident(incident, 'manager', { id: 'u', name: 'User' }, undefined, input('x').now), /approval/);
+  const approved = approveAndAssignStockIncident(incident, 'manager', { id: 'u', name: 'User' }, undefined, input('x').now);
+  assert.equal(approved.status, 'ASSIGNED'); assert.equal(approved.assignedUserId, 'u'); assert.ok(approved.reviewedAt);
+  assert.equal(rejectStockIncident(incident, 'manager', 'Not required', input('x').now).status, 'REJECTED');
   assert.equal(acknowledgeStockIncident(incident, 'warehouse_staff', input('x').now).status, 'ACKNOWLEDGED');
   assert.throws(() => closeStockIncident(incident, 'warehouse_staff', 'Done', input('x').now), /Permission denied/);
   assert.throws(() => closeStockIncident(incident, 'manager', '', input('x').now), /outcome/);
@@ -27,7 +30,9 @@ test('stock action permissions are enforced and closure requires an outcome', ()
 });
 
 test('targeted counts include live inward and outward movements without mutating stock', () => {
-  const incident = createOrUpdateStockIncident([], input('one')).incident;
+  const recommendation = createOrUpdateStockIncident([], input('one')).incident;
+  assert.throws(() => startTargetedCount(recommendation, { id: 'counter', role: 'warehouse_staff' }, { openingQuantity: 10, openingRevision: 'r1', now: '2026-01-02T10:00:00Z' }), /approval/);
+  const incident = approveAndAssignStockIncident(recommendation, 'manager', { id: 'counter', name: 'Counter' }, undefined, input('x').now);
   const { session } = startTargetedCount(incident, { id: 'counter', role: 'warehouse_staff' }, { openingQuantity: 10, openingRevision: 'r1', now: '2026-01-02T10:00:00Z' });
   const inventory = { product: 10 };
   const result = reconcileTargetedCount(session, 9, [

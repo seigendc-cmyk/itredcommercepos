@@ -28,7 +28,9 @@ function nameSimilarity(left: string, right: string): number {
   const tokenScore = union.size ? [...a].filter(token => b.has(token)).length / union.size : 0;
   const normalizedLeft = normalizeSearchText(left); const normalizedRight = normalizeSearchText(right);
   const editScore = Math.max(normalizedLeft.length, normalizedRight.length) ? 1 - levenshtein(normalizedLeft, normalizedRight) / Math.max(normalizedLeft.length, normalizedRight.length) : 0;
-  return Math.max(tokenScore, editScore);
+  const compactLeft = normalizedLeft.replace(/\s+/g, ''); const compactRight = normalizedRight.replace(/\s+/g, '');
+  const predictiveContainment = Math.min(compactLeft.length, compactRight.length) >= 4 && (compactLeft.includes(compactRight) || compactRight.includes(compactLeft)) ? 0.8 : 0;
+  return Math.max(tokenScore, editScore, predictiveContainment);
 }
 
 export function checkProductDuplicates(candidate: Partial<Product>, existing: Product[]): ProductDuplicateMatch[] {

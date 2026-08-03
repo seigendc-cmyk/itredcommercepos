@@ -29,7 +29,7 @@ const PERMISSIONS: Record<StaffRole, readonly StockActionPermission[]> = {
 export function hasStockActionPermission(role: StaffRole, permission: StockActionPermission): boolean { return PERMISSIONS[role].includes(permission); }
 export function assertStockActionPermission(role: StaffRole, permission: StockActionPermission): void { if (!hasStockActionPermission(role, permission)) throw new Error(`Permission denied: ${permission}.`); }
 
-const OPEN_STATUSES = new Set<StockIncidentStatus>(['NEW', 'ACKNOWLEDGED', 'ASSIGNED', 'IN_PROGRESS', 'AWAITING_REVIEW', 'APPROVED', 'REJECTED']);
+const OPEN_STATUSES = new Set<StockIncidentStatus>(['NEW', 'ACKNOWLEDGED', 'ASSIGNED', 'IN_PROGRESS', 'AWAITING_REVIEW', 'APPROVED']);
 const severityRank: Record<StockIncidentSeverity, number> = { LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
 
 export function createOrUpdateStockIncident(existing: StockActionIncident[], input: StockIncidentInput): { incidents: StockActionIncident[]; incident: StockActionIncident; created: boolean } {
@@ -47,13 +47,27 @@ export function createOrUpdateStockIncident(existing: StockActionIncident[], inp
 export function assignStockIncident(incident: StockActionIncident, actorRole: StaffRole, assignee: { id: string; name: string }, dueDate: string | undefined, now: string): StockActionIncident {
   assertStockActionPermission(actorRole, 'stock.count.assign');
   if (!OPEN_STATUSES.has(incident.status)) throw new Error('Closed incidents cannot be assigned.');
+  if (incident.status === 'NEW') throw new Error('Management approval is required before assignment.');
   return { ...incident, assignedUserId: assignee.id, assignedUserName: assignee.name, dueDate, status: 'ASSIGNED', updatedAt: now };
+}
+export function approveAndAssignStockIncident(incident: StockActionIncident, actorRole: StaffRole, assignee: { id: string; name: string }, dueDate: string | undefined, now: string): StockActionIncident {
+  assertStockActionPermission(actorRole, 'stock.count.review');
+  assertStockActionPermission(actorRole, 'stock.count.assign');
+  if (incident.status !== 'NEW') throw new Error('Only new BI recommendations can be approved.');
+  return { ...incident, assignedUserId: assignee.id, assignedUserName: assignee.name, dueDate, status: 'ASSIGNED', reviewedAt: now, updatedAt: now, evidence: [...incident.evidence, { id: `approval_${incident.id}_${now}`, occurredAt: now, reasonCode: 'MANAGEMENT_APPROVED_STOCKTAKE', summary: `Management approved and assigned the stocktake to ${assignee.name}.` }] };
+}
+export function rejectStockIncident(incident: StockActionIncident, actorRole: StaffRole, reason: string, now: string): StockActionIncident {
+  assertStockActionPermission(actorRole, 'stock.count.review');
+  if (incident.status !== 'NEW') throw new Error('Only new BI recommendations can be rejected.');
+  return { ...incident, status: 'REJECTED', reviewedAt: now, outcome: reason || 'BI stocktake recommendation rejected by management.', updatedAt: now };
 }
 export function acknowledgeStockIncident(incident: StockActionIncident, actorRole: StaffRole, now: string): StockActionIncident { assertStockActionPermission(actorRole, 'stock.notifications.receive'); return { ...incident, status: 'ACKNOWLEDGED', acknowledgedAt: now, updatedAt: now }; }
 export function closeStockIncident(incident: StockActionIncident, actorRole: StaffRole, outcome: string, now: string): StockActionIncident { assertStockActionPermission(actorRole, 'stock.incident.close'); if (!outcome.trim()) throw new Error('Incident outcome is required.'); return { ...incident, status: 'CLOSED', outcome, closedAt: now, updatedAt: now }; }
 
 export function startTargetedCount(incident: StockActionIncident, actor: { id: string; role: StaffRole }, input: { openingQuantity: number; openingRevision: string; now: string }): { incident: StockActionIncident; session: TargetedCountSession } {
   assertStockActionPermission(actor.role, 'stock.count.perform');
+  if (!['ASSIGNED', 'ACKNOWLEDGED'].includes(incident.status)) throw new Error('Management approval and assignment are required before starting this count.');
+  if (incident.assignedUserId && incident.assignedUserId !== actor.id) throw new Error('This stocktake is assigned to another staff member.');
   if (!incident.productId || !incident.productName) throw new Error('A targeted product is required.');
   const sessionId = incident.countSessionId || `count_${crypto.randomUUID()}`;
   const session: TargetedCountSession = { id: sessionId, tenantId: incident.tenantId, vendorId: incident.vendorId, incidentId: incident.id, stockLocationId: incident.stockLocationId, productId: incident.productId, productName: incident.productName, shelfCode: incident.shelfCode, binCode: incident.binCode, assignedCounterId: actor.id, openingSystemQuantity: input.openingQuantity, openingInventoryRevision: input.openingRevision, openingTimestamp: input.now, status: 'IN_PROGRESS', correlationId: incident.correlationId };
