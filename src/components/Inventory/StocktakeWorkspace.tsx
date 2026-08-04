@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Boxes,
@@ -33,9 +33,11 @@ import {
   getDefaultWorkingDay,
   hasStocktakePermission,
   loadStocktakeDraft,
+  loadStocktakeWorkingContext,
   loadStocktakeSettings,
   resolveStocktakeRows,
   saveStocktakeDraft,
+  saveStocktakeWorkingContext,
   StocktakeCountRow,
   StocktakeDayStatus,
   StocktakeExportContext,
@@ -119,6 +121,7 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
   const [showSystemQuantity, setShowSystemQuantity] = useState(!settings.blindCountEnabled);
   const [includeNotes, setIncludeNotes] = useState(true);
   const [includeRecount, setIncludeRecount] = useState(true);
+  const workingContextRestored = useRef(false);
 
   useEffect(() => {
     try {
@@ -144,6 +147,20 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
   const canExport = hasStocktakePermission(activeStaff.role, 'stocktake.export');
   const canViewSystemQuantity = hasStocktakePermission(activeStaff.role, 'stocktake.view_system_quantity');
   const canViewValuation = hasStocktakePermission(activeStaff.role, 'stocktake.view_valuation');
+
+  useEffect(() => {
+    if (workingContextRestored.current || !canView) return;
+    workingContextRestored.current = true;
+    const context = loadStocktakeWorkingContext(vendorId, activeStaff.role);
+    if (!context) return;
+    const location = context.stockLocationType === 'warehouse' ? warehouses.find(item => item.id === context.stockLocationId) : branches.find(item => item.id === context.stockLocationId);
+    if (!location) return;
+    const restoredSchedule = buildCycleCountSchedule({ vendorId, stockLocationId: location.id, stockLocationAliases: [location.id, location.name, location.code], products });
+    if (restoredSchedule.cycleId !== context.cycleId) return;
+    setSelectedLocationType(context.stockLocationType);
+    setSelectedLocationId(context.stockLocationId);
+    setActiveCycleDay(context.workingDayNumber);
+  }, [activeStaff.role, branches, canView, products, vendorId, warehouses]);
 
   useEffect(() => {
     if (!selectedLocationId) {
@@ -308,6 +325,7 @@ export const StocktakeWorkspace: React.FC<StocktakeWorkspaceProps> = ({
 
   const saveDraft = () => {
     const draft = saveStocktakeDraft({ vendorId, cycleId: schedule.cycleId, stockLocationId: selectedLocationId, workingDayNumber: activeCycleDay, counts, reasons: varianceReasons, savedBy: activeStaff.id }, activeStaff.role);
+    saveStocktakeWorkingContext({ vendorId, cycleId: schedule.cycleId, stockLocationId: selectedLocationId, stockLocationType: selectedLocationType, workingDayNumber: activeCycleDay }, activeStaff.role);
     setIsDirty(false);
     setDayStatuses(previous => ({ ...previous, [activeCycleDay]: 'DRAFT_SAVED' }));
     void onLogBIEvent?.('STOCKTAKE_DRAFT_SAVED', eventDetails({ outcome: 'saved', savedAt: draft.savedAt }));

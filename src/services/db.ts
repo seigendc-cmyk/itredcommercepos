@@ -1130,7 +1130,9 @@ export async function createPurchaseOrder(
       },
     });
   } catch (error) {
-    await updateDoc(doc(db, 'vendors', vendorId, 'purchase_orders', id), { status: 'DRAFT', updatedAt: new Date().toISOString() });
+    // Roll back the just-created PO when its paired approval request cannot be
+    // persisted. The form remains open with the user's lines for a safe retry.
+    await deleteDoc(doc(db, 'vendors', vendorId, 'purchase_orders', id)).catch(() => {});
     throw error;
   }
   await logBIEvent(vendorId, 'PURCHASE_ORDER_CREATED', `${order.source} ${order.orderNumber} submitted for approval`, { purchaseOrderId: id, supplierId: order.supplierId, lineCount: order.items.length, total: order.items.reduce((sum, item) => sum + item.orderedQuantity * item.unitCost, 0), inventoryChanged: false }, { staffId: input.requester.id, staffName: input.requester.name, staffRole: input.requester.role });
@@ -2220,6 +2222,10 @@ export async function createApprovalRequest(
     segregationOfDuties: policy.segregationOfDuties,
     notificationAudienceRoles: INVENTORY_WORKFLOW_POLICIES[submission.entityType].approveRoles,
   }, now);
+  // Firestore rejects undefined values, including optional workflow context and
+  // optional item metadata. Preserve the domain object while writing a clean,
+  // structurally identical document with undefined properties omitted.
+  const firestoreRequest = JSON.parse(JSON.stringify(request)) as ApprovalRequest;
 
   const persisted = await runTransaction(db, async transaction => {
     if (idempotencyKey) {
@@ -2232,7 +2238,7 @@ export async function createApprovalRequest(
         return { request: existing, created: false };
       }
     }
-    transaction.set(doc(db, 'vendors', vendorId, 'approval_requests', id), request);
+    transaction.set(doc(db, 'vendors', vendorId, 'approval_requests', id), firestoreRequest);
     for (const [index, status] of (['DRAFT', 'SUBMITTED', 'PENDING_APPROVAL'] as InventoryWorkflowStatus[]).entries()) {
       const event = auditEventDocument(
         { ...request, version: index + 1 },
@@ -2243,7 +2249,7 @@ export async function createApprovalRequest(
       );
       transaction.set(doc(db, 'vendors', vendorId, 'approval_events', event.id), event);
     }
-    return { request, created: true };
+    return { request: firestoreRequest, created: true };
   });
 
   if (!persisted.created) return persisted.request;

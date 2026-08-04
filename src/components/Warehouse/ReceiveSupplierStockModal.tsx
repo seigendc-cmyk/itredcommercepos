@@ -15,6 +15,7 @@ import {
   searchReceivingProducts,
 } from '../../services/supplierReceiving';
 import { ProductLedgerModal } from './ProductLedgerModal';
+import { AddSupplierModal } from '../Suppliers/AddSupplierModal';
 
 interface ReceiveSupplierStockModalProps {
   isOpen: boolean;
@@ -60,6 +61,7 @@ export const ReceiveSupplierStockModal: React.FC<ReceiveSupplierStockModalProps>
   const [loadingSuppliers, setLoadingSuppliers] = useState(false);
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [error, setError] = useState('');
+  const [addSupplierOpen, setAddSupplierOpen] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -214,9 +216,10 @@ export const ReceiveSupplierStockModal: React.FC<ReceiveSupplierStockModalProps>
             </label>
             <label className="text-xs font-bold text-[#1F242D]">
               Supplier
-              <select value={supplierId} disabled={loadingSuppliers} onChange={event => setSupplierId(event.target.value)}
+              <select value={supplierId} disabled={loadingSuppliers} onChange={event => { if (event.target.value === '__add_new__') setAddSupplierOpen(true); else setSupplierId(event.target.value); }}
                 className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5">
                 <option value="">{loadingSuppliers ? 'Loading suppliers…' : 'Select supplier'}</option>
+                <option value="__add_new__">＋ Add New Supplier…</option>
                 {suppliers.map(supplier => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}
               </select>
             </label>
@@ -373,6 +376,7 @@ export const ReceiveSupplierStockModal: React.FC<ReceiveSupplierStockModalProps>
         warehouse={activeWarehouses.find(warehouse => warehouse.id === warehouseId)}
         product={ledgerProduct}
       />
+      <AddSupplierModal isOpen={addSupplierOpen} onClose={() => setAddSupplierOpen(false)} vendorId={vendorId} activeStaff={activeStaff} onCreated={supplier => { setSuppliers(current => [...current, supplier].sort((a, b) => a.name.localeCompare(b.name))); setSupplierId(supplier.id); }} />
     </>
   );
 };

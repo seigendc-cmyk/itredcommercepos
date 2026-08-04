@@ -14,8 +14,10 @@ import {
   filterStocktakeRows,
   hasStocktakePermission,
   loadStocktakeDraft,
+  loadStocktakeWorkingContext,
   resolveStocktakeRows,
   saveStocktakeDraft,
+  saveStocktakeWorkingContext,
   StocktakeExportContext,
   summarizeStocktake,
 } from '.';
@@ -114,6 +116,15 @@ test('drafts remain separate, role-enforced and scoped by cycle, location and da
   assert.throws(() => saveStocktakeDraft({ vendorId: 'vendor-1', cycleId: 'cycle-1', stockLocationId: warehouse.id, workingDayNumber: 3, counts: {}, reasons: {}, savedBy: 'cashier' }, 'cashier'), /stocktake.draft.save/);
   assert.equal(deriveStocktakeDayStatus({ rowCount: 2, countedCount: 1, draftSaved: false, submitted: false }), 'IN_PROGRESS');
   assert.equal(deriveStocktakeDayStatus({ rowCount: 2, countedCount: 2, draftSaved: true, submitted: false }), 'READY_FOR_REVIEW');
+});
+
+test('saved working context restores its exact day while drafts remain isolated from other days', () => {
+  saveStocktakeDraft({ vendorId: 'vendor-1', cycleId: 'cycle-1', stockLocationId: warehouse.id, workingDayNumber: 1, counts: { a: 9 }, reasons: { a: 'SYSTEM_DATA_ENTRY_ERROR' }, savedBy: staff.id }, staff.role);
+  saveStocktakeWorkingContext({ vendorId: 'vendor-1', cycleId: 'cycle-1', stockLocationId: warehouse.id, stockLocationType: 'warehouse', workingDayNumber: 1 }, staff.role);
+  const restored = loadStocktakeWorkingContext('vendor-1', staff.role);
+  assert.deepEqual(restored && { cycleId: restored.cycleId, stockLocationId: restored.stockLocationId, workingDayNumber: restored.workingDayNumber }, { cycleId: 'cycle-1', stockLocationId: warehouse.id, workingDayNumber: 1 });
+  assert.equal(loadStocktakeDraft('vendor-1', 'cycle-1', warehouse.id, 1, staff.role)?.counts.a, 9);
+  assert.equal(loadStocktakeDraft('vendor-1', 'cycle-1', warehouse.id, 2, staff.role), null);
 });
 
 function exportContext(role: StaffMember['role'] = 'manager', blindCountMode = true): StocktakeExportContext {

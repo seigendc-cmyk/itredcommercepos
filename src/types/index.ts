@@ -207,6 +207,10 @@ export interface Supplier {
   vendorId: string;
   name: string;
   code?: string;
+  fullAddress?: string;
+  phone?: string;
+  businessNumber?: string;
+  taxNumber?: string;
   status?: 'active' | 'suspended' | 'archived';
   createdAt?: string;
 }
@@ -227,6 +231,8 @@ export interface PurchaseOrderItem {
   orderedQuantity: number;
   receivedQuantity: number;
   unitCost: number;
+  discountPercent?: number;
+  taxRate?: number;
   unitOfMeasure?: string;
   batchNumber?: string;
 }
@@ -236,10 +242,25 @@ export interface PurchaseOrder {
   vendorId: string;
   supplierId: string;
   supplierName: string;
+  supplierAddress?: string;
+  supplierPhone?: string;
+  supplierBusinessNumber?: string;
+  supplierTaxNumber?: string;
   orderNumber: string;
   status: PurchaseOrderStatus;
   source?: 'PLANNED' | 'BI_RECOMMENDATION';
   notes?: string;
+  orderDate?: string;
+  expectedDeliveryDate?: string;
+  destinationWarehouseId?: string;
+  destinationWarehouseName?: string;
+  buyerReference?: string;
+  supplierQuotationNumber?: string;
+  paymentTerms?: string;
+  deliveryTerms?: string;
+  currency?: string;
+  shippingAddress?: string;
+  billingAddress?: string;
   requestedBy?: WorkflowActor;
   approvedBy?: WorkflowActor;
   approvedAt?: string;

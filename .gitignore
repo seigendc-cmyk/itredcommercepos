@@ -13,3 +13,7 @@ coverage/
 !.env.test
 
 .firebase/
+
+# Playwright generated output
+playwright-report/
+test-results/

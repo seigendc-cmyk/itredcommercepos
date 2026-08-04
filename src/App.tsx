@@ -1057,7 +1057,7 @@ export default function App() {
         )}
 
         {activeTab === 'purchase_orders' && (activeStaff.grantedMenuIds.includes('purchase_orders') || activeStaff.grantedMenuIds.includes('products')) && (
-          <PurchaseOrderWorkspace vendorId={vendor.id} businessName={vendor.businessName} currency={vendor.currency || '$'} products={products} activeStaff={activeStaff} onChanged={refreshAllData} />
+          <PurchaseOrderWorkspace vendorId={vendor.id} businessName={vendor.businessName} currency={vendor.currency || '$'} products={products} warehouses={warehouses} activeStaff={activeStaff} onChanged={refreshAllData} />
         )}
 
         {/* Sales & Reports */}

@@ -86,6 +86,9 @@ test('authenticated stocktake day lists, drafts, exports, permissions and approv
   await page.getByRole('button', { name: 'Save Draft and Continue' }).click();
   await expect(page.getByText('QA Product beta', { exact: true })).toBeVisible();
   await page.reload();
+  await expect(page.getByRole('button', { name: /^Working Day 1,/ })).toHaveClass(/bg-\[#FF6600\]/);
+  await expect(page.getByText('QA Product alpha', { exact: true })).toBeVisible();
+  await expect(page.getByText('QA Product beta', { exact: true })).toHaveCount(0);
   await expect(page.getByLabel('Physical count for QA-ALPHA', { exact: true })).toHaveValue('9');
   await expect(header).toContainText('Draft Saved');
   await selectDay(page, 2);
