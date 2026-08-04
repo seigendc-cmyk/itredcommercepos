@@ -70,6 +70,7 @@ import {
   completeSaleTransaction,
   SaleCompletionResult,
 } from './saleTransaction';
+import { createFirestoreAtomicSaleRunner } from '../features/inventory/infrastructure/firestoreSaleInventoryAdapter';
 import {
   assertTerminalBelongsToActiveBranch,
   canResourceProcessTransactions,
@@ -1754,60 +1755,24 @@ export async function fetchStockAdjustments(vendorId: string): Promise<StockAdju
 
 // 4. Submit POS Order (Checkout)
 export async function processPOSOrder(
+  tenantId: string,
   vendorId: string,
+  actorId: string,
   orderId: string,
   orderData: Omit<Order, 'id' | 'createdAt' | 'status'>,
 ): Promise<SaleCompletionResult> {
   const now = new Date().toISOString();
   const result = await completeSaleTransaction(
     {
+      tenantId,
       vendorId,
+      actorId,
+      checkoutAttemptId: orderId,
       orderId,
       createdAt: now,
       orderData,
     },
-    operation =>
-      runTransaction(db, transaction =>
-        operation({
-          async getOrder(id) {
-            const snapshot = await transaction.get(
-              doc(db, 'vendors', vendorId, 'orders', id),
-            );
-            return snapshot.exists() ? snapshot.data() as Order : null;
-          },
-          async getTerminal(terminalId) {
-            const snapshot = await transaction.get(
-              doc(db, 'vendors', vendorId, 'terminals', terminalId),
-            );
-            return snapshot.exists() ? snapshot.data() as Terminal : null;
-          },
-          async getInventory(branchId, productId) {
-            const inventoryId = `${vendorId}_${branchId}_${productId}`;
-            const snapshot = await transaction.get(
-              doc(db, 'vendors', vendorId, 'branch_inventory', inventoryId),
-            );
-            return snapshot.exists() ? snapshot.data() as BranchInventory : null;
-          },
-          setOrder(order) {
-            transaction.set(
-              doc(db, 'vendors', vendorId, 'orders', order.id),
-              order,
-            );
-          },
-          setInventory(inventory) {
-            transaction.set(
-              doc(db, 'vendors', vendorId, 'branch_inventory', inventory.id),
-              inventory,
-            );
-          },
-          setMovement(movement) {
-            transaction.set(
-              doc(db, 'vendors', vendorId, 'inventory_movements', movement.id),
-              movement,
-            );
-          },
-        }),
-      ),
+    createFirestoreAtomicSaleRunner(vendorId),
   );
 
   if (!result.success) {
@@ -1821,7 +1786,7 @@ export async function processPOSOrder(
       if (stockRaw) {
         const stock = JSON.parse(stockRaw) as Record<string, number>;
         result.movements.forEach(movement => {
-          stock[movement.productId] = movement.quantityAfter;
+          stock[movement.productId] = movement.sourceAfterQty ?? movement.compatibility.quantityAfter;
         });
         localStorage.setItem(stockKey, JSON.stringify(stock));
       }

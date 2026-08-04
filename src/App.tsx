@@ -534,7 +534,7 @@ export default function App() {
 
   // Process POS Order completion
   const handleConfirmPayment = async (paymentDetails: any) => {
-    if (!vendor || !activeBranch || !activeTerminal || !activeStaff || !checkoutAttemptId) {
+    if (!authUser || !vendor || !activeBranch || !activeTerminal || !activeStaff || !checkoutAttemptId) {
       alert('The sale session is incomplete. Close payment and try again.');
       return;
     }
@@ -548,7 +548,7 @@ export default function App() {
       const deliveryFee = deliveryDetails ? deliveryDetails.deliveryFee : 0;
       const finalTotalAmount = cartTotals.total + deliveryFee;
 
-      const saleResult = await processPOSOrder(vendor.id, checkoutAttemptId, {
+      const saleResult = await processPOSOrder(authUser.uid, vendor.id, activeStaff.id, checkoutAttemptId, {
         vendorId: vendor.id,
         branchId: activeBranch.id,
         branchName: activeBranch.name,

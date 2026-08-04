@@ -57,12 +57,12 @@ export function branchToCanonicalStockLocation(branch: Branch, tenantId: string)
 
 export function canonicalBalanceToWarehouseInventory(balance: InventoryBalance, averageUnitCost?: number): WarehouseInventory {
   validateInventoryBalance(balance);
-  return { id: `${balance.vendorId}_${balance.stockLocationId}_${balance.productId}`, vendorId: balance.vendorId, warehouseId: balance.stockLocationId, productId: balance.productId, quantity: balance.onHandQty, averageUnitCost, lastUpdated: balance.updatedAt };
+  return { id: `${balance.vendorId}_${balance.stockLocationId}_${balance.productId}`, vendorId: balance.vendorId, warehouseId: balance.stockLocationId, productId: balance.productId, quantity: balance.onHandQty, ...(averageUnitCost === undefined ? {} : { averageUnitCost }), lastUpdated: balance.updatedAt };
 }
 
 export function canonicalBalanceToBranchInventory(balance: InventoryBalance, averageUnitCost?: number): BranchInventory {
   validateInventoryBalance(balance);
-  return { id: `${balance.vendorId}_${balance.stockLocationId}_${balance.productId}`, vendorId: balance.vendorId, branchId: balance.stockLocationId, productId: balance.productId, quantity: balance.onHandQty, averageUnitCost, lastUpdated: balance.updatedAt };
+  return { id: `${balance.vendorId}_${balance.stockLocationId}_${balance.productId}`, vendorId: balance.vendorId, branchId: balance.stockLocationId, productId: balance.productId, quantity: balance.onHandQty, ...(averageUnitCost === undefined ? {} : { averageUnitCost }), lastUpdated: balance.updatedAt };
 }
 
 export function canonicalStockLocationToWarehouse(location: StockLocation, existing: Warehouse): Warehouse {
