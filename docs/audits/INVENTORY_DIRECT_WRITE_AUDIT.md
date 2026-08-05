@@ -8,16 +8,21 @@ Phase 1 baseline: `def06cf`
 
 Phase 2 starting commit: `191e415`
 
+Phase 3 starting commit: `e2fe626`
+
 ## Result
 
-`npm run audit:inventory` reports 37 contextual findings and 0 prohibited writes after Phase 2:
+`npm run audit:inventory` reports 32 contextual findings and 0 prohibited writes after Phase 3:
 
-- 34 `LEGACY_REQUIRES_MIGRATION` findings in `src/services/db.ts`;
+- 27 `LEGACY_REQUIRES_MIGRATION` findings in `src/services/db.ts`;
 - 2 `APPROVED_CANONICAL_SALE_WRITE` findings in `src/features/inventory/infrastructure/firestoreSaleInventoryAdapter.ts`;
+- 2 `APPROVED_CANONICAL_SUPPLIER_RECEIPT_WRITE` findings in `src/features/inventory/infrastructure/firestoreSupplierReceiptAdapter.ts`;
 - 1 `APPROVED_BOUNDARY_WRITE` finding in the audit test fixture;
 - 0 new direct-write files.
 
 Before Phase 2, sale posting contributed two contextual `LEGACY_REQUIRES_MIGRATION` findings at the former `src/services/db.ts:1787` and `:1799` branch-inventory write boundary. Those sale reads/writes now appear as two approved infrastructure findings in `firestoreSaleInventoryAdapter.ts`; `src/services/saleTransaction.ts` contains no physical inventory write.
+
+Before Phase 3, supplier receiving contributed the warehouse inventory reference/write and associated quantity/cost findings around the former `src/services/db.ts:2507`-`:2627` block. That block has been replaced by an infrastructure call. The two physical warehouse-inventory findings now appear only in `firestoreSupplierReceiptAdapter.ts` as approved canonical supplier receipt writes. The audit quantity matcher was also narrowed to exact bucket field names so PO fields such as `orderedQuantity` are not misclassified as balance mutations.
 
 The audit reports collection references and associated quantity/write lines separately so reviewers can see both the persistence target and the mutated values. Some findings are contextual reads or preparation lines near an atomic write; they remain reported deliberately to prevent a new write from being hidden behind a pre-built document reference.
 
@@ -31,8 +36,7 @@ The audit reports collection references and associated quantity/write lines sepa
 | Legacy adjustment paths | `branch_inventory` | `src/services/db.ts:1696`, `:1701` | `LEGACY_REQUIRES_MIGRATION` |
 | Approved opening-balance posting | `warehouse_inventory` | `src/services/db.ts:2320`, `:2352` | `LEGACY_REQUIRES_MIGRATION` |
 | Approved transfer completion | `branch_inventory` | `src/services/db.ts:2397`, `:2410`, `:2441`, `:2449` | `LEGACY_REQUIRES_MIGRATION` |
-| Approved supplier receipt | `warehouse_inventory` | `src/services/db.ts:2529`, `:2611`, `:2613` | `LEGACY_REQUIRES_MIGRATION` |
-| Approved stock adjustment | dynamic warehouse/branch collection | `src/services/db.ts:2645`, `:2676`, `:2684` | `LEGACY_REQUIRES_MIGRATION` |
+| Approved stock adjustment | dynamic warehouse/branch collection | `src/services/db.ts:2540`, `:2571` | `LEGACY_REQUIRES_MIGRATION` |
 
 ## Boundary policy
 

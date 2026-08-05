@@ -1,11 +1,12 @@
 import { InventoryBalance } from './inventoryBalance';
 import { InventoryDomainError, requireInventoryIdentity } from './inventoryErrors';
-import { InventoryMovement, InventoryMovementType } from './inventoryMovement';
+import { InventoryMovement, InventoryMovementType, InventoryQuantityBucket } from './inventoryMovement';
 import { StockLocation } from './stockLocation';
 
 export interface InventoryPostingCommand {
   commandId: string; idempotencyKey: string; tenantId: string; vendorId: string; productId: string;
   movementType: InventoryMovementType; quantity: number; sourceLocationId?: string; destinationLocationId?: string;
+  quantityBucket?: InventoryQuantityBucket;
   referenceType: string; referenceId: string; actorId: string; approvalRequestId?: string; occurredAt: string;
 }
 export interface InventoryPostingResult { movement: InventoryMovement; balances: InventoryBalance[]; duplicate: boolean; }
@@ -16,6 +17,8 @@ const DESTINATION_ONLY = new Set<InventoryMovementType>(['OPENING_BALANCE', 'SUP
 export function validateInventoryPostingCommand(command: InventoryPostingCommand): InventoryPostingCommand {
   for (const field of ['commandId', 'idempotencyKey', 'tenantId', 'vendorId', 'productId', 'movementType', 'referenceType', 'referenceId', 'actorId', 'occurredAt'] as const) requireInventoryIdentity(command[field], field);
   if (!Number.isFinite(command.quantity) || command.quantity <= 0) throw new InventoryDomainError('INVALID_QUANTITY', 'Movement quantity must be a positive finite magnitude.');
+  if (command.quantityBucket && !['ON_HAND', 'QUARANTINED', 'DAMAGED'].includes(command.quantityBucket)) throw new InventoryDomainError('INVALID_QUANTITY', 'Unknown inventory quantity bucket.');
+  if (command.quantityBucket && command.quantityBucket !== 'ON_HAND' && command.movementType !== 'SUPPLIER_RECEIPT') throw new InventoryDomainError('INVALID_ROUTE', 'Only supplier receipts may post directly to quarantined or damaged stock.');
   if (command.sourceLocationId !== undefined) requireInventoryIdentity(command.sourceLocationId, 'sourceLocationId');
   if (command.destinationLocationId !== undefined) requireInventoryIdentity(command.destinationLocationId, 'destinationLocationId');
   return command;

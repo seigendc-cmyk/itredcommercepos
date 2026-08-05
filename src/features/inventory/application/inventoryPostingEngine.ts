@@ -42,12 +42,18 @@ export class InventoryPostingEngine {
 
       const updatedSource = sourceBalance ? validateInventoryBalance({ ...sourceBalance, onHandQty: sourceBalance.onHandQty - command.quantity, version: sourceBalance.version + 1, updatedAt: recordedAt }) : undefined;
       let updatedDestination: InventoryBalance | undefined;
+      const destinationBucket = command.quantityBucket ?? 'ON_HAND';
       if (command.movementType === 'TRANSFER_DISPATCH' && destinationBalance) {
         updatedDestination = validateInventoryBalance({ ...destinationBalance, inTransitQty: destinationBalance.inTransitQty + command.quantity, version: destinationBalance.version + 1, updatedAt: recordedAt });
       } else if (destinationAffected && destinationBalance) {
+        const quantityChanges = destinationBucket === 'QUARANTINED'
+          ? { quarantinedQty: destinationBalance.quarantinedQty + command.quantity }
+          : destinationBucket === 'DAMAGED'
+            ? { damagedQty: destinationBalance.damagedQty + command.quantity }
+            : { onHandQty: destinationBalance.onHandQty + command.quantity };
         updatedDestination = validateInventoryBalance({
           ...destinationBalance,
-          onHandQty: destinationBalance.onHandQty + command.quantity,
+          ...quantityChanges,
           inTransitQty: command.movementType === 'TRANSFER_RECEIPT' ? destinationBalance.inTransitQty - command.quantity : destinationBalance.inTransitQty,
           version: destinationBalance.version + 1,
           updatedAt: recordedAt,
@@ -56,9 +62,9 @@ export class InventoryPostingEngine {
       const movement = immutableInventoryMovement({
         id: command.commandId, idempotencyKey: command.idempotencyKey, tenantId: command.tenantId, vendorId: command.vendorId,
         productId: command.productId, sourceLocationId: command.sourceLocationId, destinationLocationId: command.destinationLocationId,
-        movementType: command.movementType, quantity: command.quantity, sourceBeforeQty: sourceBalance?.onHandQty,
-        sourceAfterQty: updatedSource?.onHandQty, destinationBeforeQty: destinationBalance?.onHandQty,
-        destinationAfterQty: updatedDestination?.onHandQty, referenceType: command.referenceType, referenceId: command.referenceId,
+        movementType: command.movementType, quantity: command.quantity, quantityBucket: command.quantityBucket, sourceBeforeQty: sourceBalance?.onHandQty,
+        sourceAfterQty: updatedSource?.onHandQty, destinationBeforeQty: destinationBalance ? this.bucketQuantity(destinationBalance, destinationBucket) : undefined,
+        destinationAfterQty: updatedDestination ? this.bucketQuantity(updatedDestination, destinationBucket) : undefined, referenceType: command.referenceType, referenceId: command.referenceId,
         actorId: command.actorId, approvalRequestId: command.approvalRequestId, status: 'POSTED', occurredAt: command.occurredAt, recordedAt,
       });
       for (const balance of [updatedSource, updatedDestination]) if (balance) await repository.saveBalance(balance);
@@ -78,6 +84,12 @@ export class InventoryPostingEngine {
   private async getOrCreateBalance(repository: InventoryRepository, command: InventoryPostingCommand, locationId: string, updatedAt: string): Promise<InventoryBalance> {
     const balance = await repository.getBalance(command.tenantId, command.vendorId, locationId, command.productId);
     return balance ? validateInventoryBalance(balance) : emptyInventoryBalance({ tenantId: command.tenantId, vendorId: command.vendorId, stockLocationId: locationId, productId: command.productId }, updatedAt);
+  }
+
+  private bucketQuantity(balance: InventoryBalance, bucket: 'ON_HAND' | 'QUARANTINED' | 'DAMAGED'): number {
+    if (bucket === 'QUARANTINED') return balance.quarantinedQty;
+    if (bucket === 'DAMAGED') return balance.damagedQty;
+    return balance.onHandQty;
   }
 
   private async readExistingBalances(repository: InventoryRepository, command: InventoryPostingCommand): Promise<InventoryBalance[]> {

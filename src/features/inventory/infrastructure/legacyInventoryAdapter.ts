@@ -24,7 +24,9 @@ export function warehouseInventoryToCanonicalBalance(inventory: WarehouseInvento
   const identity = { tenantId, vendorId: inventory.vendorId, stockLocationId: inventory.warehouseId, productId: inventory.productId };
   return validateInventoryBalance({
     ...identity, id: deterministicInventoryBalanceId(identity), onHandQty: inventory.quantity,
-    reservedQty: 0, inTransitQty: 0, quarantinedQty: 0, damagedQty: 0, version: 0, updatedAt: inventory.lastUpdated,
+    reservedQty: inventory.reservedQuantity ?? 0, inTransitQty: inventory.inTransitQuantity ?? 0,
+    quarantinedQty: inventory.quarantinedQuantity ?? 0, damagedQty: inventory.damagedQuantity ?? 0,
+    version: inventory.version ?? 0, updatedAt: inventory.lastUpdated,
   });
 }
 
@@ -33,7 +35,9 @@ export function branchInventoryToCanonicalBalance(inventory: BranchInventory, te
   const identity = { tenantId, vendorId: inventory.vendorId, stockLocationId: inventory.branchId, productId: inventory.productId };
   return validateInventoryBalance({
     ...identity, id: deterministicInventoryBalanceId(identity), onHandQty: inventory.quantity,
-    reservedQty: 0, inTransitQty: 0, quarantinedQty: 0, damagedQty: 0, version: 0, updatedAt: inventory.lastUpdated,
+    reservedQty: inventory.reservedQuantity ?? 0, inTransitQty: inventory.inTransitQuantity ?? 0,
+    quarantinedQty: inventory.quarantinedQuantity ?? 0, damagedQty: inventory.damagedQuantity ?? 0,
+    version: inventory.version ?? 0, updatedAt: inventory.lastUpdated,
   });
 }
 
@@ -57,12 +61,12 @@ export function branchToCanonicalStockLocation(branch: Branch, tenantId: string)
 
 export function canonicalBalanceToWarehouseInventory(balance: InventoryBalance, averageUnitCost?: number): WarehouseInventory {
   validateInventoryBalance(balance);
-  return { id: `${balance.vendorId}_${balance.stockLocationId}_${balance.productId}`, vendorId: balance.vendorId, warehouseId: balance.stockLocationId, productId: balance.productId, quantity: balance.onHandQty, ...(averageUnitCost === undefined ? {} : { averageUnitCost }), lastUpdated: balance.updatedAt };
+  return { id: `${balance.vendorId}_${balance.stockLocationId}_${balance.productId}`, vendorId: balance.vendorId, warehouseId: balance.stockLocationId, productId: balance.productId, quantity: balance.onHandQty, reservedQuantity: balance.reservedQty, inTransitQuantity: balance.inTransitQty, quarantinedQuantity: balance.quarantinedQty, damagedQuantity: balance.damagedQty, version: balance.version, ...(averageUnitCost === undefined ? {} : { averageUnitCost }), lastUpdated: balance.updatedAt };
 }
 
 export function canonicalBalanceToBranchInventory(balance: InventoryBalance, averageUnitCost?: number): BranchInventory {
   validateInventoryBalance(balance);
-  return { id: `${balance.vendorId}_${balance.stockLocationId}_${balance.productId}`, vendorId: balance.vendorId, branchId: balance.stockLocationId, productId: balance.productId, quantity: balance.onHandQty, ...(averageUnitCost === undefined ? {} : { averageUnitCost }), lastUpdated: balance.updatedAt };
+  return { id: `${balance.vendorId}_${balance.stockLocationId}_${balance.productId}`, vendorId: balance.vendorId, branchId: balance.stockLocationId, productId: balance.productId, quantity: balance.onHandQty, reservedQuantity: balance.reservedQty, inTransitQuantity: balance.inTransitQty, quarantinedQuantity: balance.quarantinedQty, damagedQuantity: balance.damagedQty, version: balance.version, ...(averageUnitCost === undefined ? {} : { averageUnitCost }), lastUpdated: balance.updatedAt };
 }
 
 export function canonicalStockLocationToWarehouse(location: StockLocation, existing: Warehouse): Warehouse {

@@ -91,7 +91,6 @@ import {
   assertReceiptAllowed,
   compareReceiptToPurchaseOrder,
   mergeReceiptLine,
-  nextPurchaseOrderStatus,
   ReceiptDraftLine,
 } from './supplierReceiving';
 import {
@@ -105,7 +104,8 @@ import {
 } from './stockTransferWorkflow';
 import { assertProductPermission, determineProductRemoval, ProductUsageSummary } from './productLifecycle';
 import { assertCanonicalProductReference, assertDuplicateDecision, checkProductDuplicates, normalizeHsCode, ProductDuplicateDecisionInput, validateHsCode, assertExtendedProductPermission, effectiveProductTaxRate } from '../features/products';
-import { requiresBelowAverageCostApproval, weightedAverageCost } from '../features/inventory/averageCost';
+import { requiresBelowAverageCostApproval } from '../features/inventory/averageCost';
+import { postApprovedSupplierReceiptInFirestoreTransaction } from '../features/inventory/infrastructure/firestoreSupplierReceiptAdapter';
 
 // Helper for local caching/fallback to ensure snappy preview & offline resiliency
 const LOCAL_STORAGE_KEY = 'itred_pos_vendor_data_';
@@ -2499,141 +2499,36 @@ export async function reviewApprovalRequest(
     } else if (current.entityType === 'SUPPLIER_STOCK_RECEIPT') {
       const items = requirePayloadItems(payload);
       const warehouseId = current.warehouseId || payload.locationId;
-      if (!warehouseId) throw new Error('Receipt warehouse is required.');
-      if (payload.locationType !== 'warehouse' || current.branchId) {
-        throw new Error('Direct supplier receipt into a branch is not permitted.');
-      }
-      const warehouseRef = doc(db, 'vendors', vendorId, 'warehouses', warehouseId);
-      const productTotals = new Map<string, { productName: string; quantity: number; totalCost: number }>();
-      const receiptKeys = new Set<string>();
-      items.forEach(item => {
-        const receiptKey = [
-          item.productId,
-          item.batchNumber?.trim().toLowerCase() || '',
-          item.unitOfMeasure?.trim().toLowerCase() || 'unit',
-        ].join('|');
-        if (receiptKeys.has(receiptKey)) {
-          throw new Error(`Duplicate receipt line for ${item.productName}, batch and unit.`);
-        }
-        receiptKeys.add(receiptKey);
-        const quantity = item.quantity || 0;
-        const total = productTotals.get(item.productId);
-        productTotals.set(item.productId, {
-          productName: item.productName,
-          quantity: (total?.quantity || 0) + quantity,
-          totalCost: (total?.totalCost || 0) + quantity * Number(item.unitCost || 0),
-        });
-      });
-      const productEntries = [...productTotals.entries()];
-      const inventoryRefs = productEntries.map(([productId]) =>
-        doc(db, 'vendors', vendorId, 'warehouse_inventory', `${vendorId}_${warehouseId}_${productId}`),
-      );
-      const productRefs = productEntries.map(([productId]) => doc(db, 'vendors', vendorId, 'products', productId));
-      const purchaseOrderRef = payload.purchaseOrderId
-        ? doc(db, 'vendors', vendorId, 'purchase_orders', payload.purchaseOrderId)
-        : null;
-      const [warehouseSnapshot, inventorySnapshots, productSnapshots, purchaseOrderSnapshot] = await Promise.all([
-        transaction.get(warehouseRef),
-        Promise.all(inventoryRefs.map(reference => transaction.get(reference))),
-        Promise.all(productRefs.map(reference => transaction.get(reference))),
-        purchaseOrderRef ? transaction.get(purchaseOrderRef) : Promise.resolve(null),
-      ]);
-      if (!warehouseSnapshot.exists() || !canResourceProcessTransactions(warehouseSnapshot.data() as Warehouse)) {
-        throw new Error('The supplier receipt warehouse is not active and licensed.');
-      }
-      if (purchaseOrderRef) {
-        if (!purchaseOrderSnapshot?.exists()) throw new Error('The selected purchase order no longer exists.');
-        const purchaseOrder = normalizePurchaseOrder(
-          vendorId,
-          purchaseOrderSnapshot.id,
-          purchaseOrderSnapshot.data() as Record<string, unknown>,
-        );
-        if (purchaseOrder.status !== 'OPEN' && purchaseOrder.status !== 'PARTIALLY_RECEIVED') {
-          throw new Error(`Purchase order ${purchaseOrder.orderNumber} is no longer open for receiving.`);
-        }
-        if (payload.supplierId && purchaseOrder.supplierId !== payload.supplierId) {
-          throw new Error('The selected purchase order does not belong to this supplier.');
-        }
-        const receiptByProduct = new Map(productEntries);
-        const updatedItems = purchaseOrder.items.map(item => {
-          const receiptQuantity = receiptByProduct.get(item.productId)?.quantity || 0;
-          receiptByProduct.delete(item.productId);
-          const receivedQuantity = item.receivedQuantity + receiptQuantity;
-          if (
-            receivedQuantity > item.orderedQuantity &&
-            !(
-              payload.overReceiptExceptionRequested === true &&
-              Boolean(payload.overReceiptReason?.trim()) &&
-              (reviewer.role === 'sysadmin' || reviewer.role === 'manager')
-            )
-          ) {
-            throw new Error(`Over-receipt is not approved for ${item.productName}.`);
-          }
-          return { ...item, receivedQuantity };
-        });
-        if (receiptByProduct.size > 0 && !(
-          payload.overReceiptExceptionRequested === true &&
-          Boolean(payload.overReceiptReason?.trim()) &&
-          (reviewer.role === 'sysadmin' || reviewer.role === 'manager')
-        )) {
-          throw new Error('The receipt contains a product that is not on the selected purchase order.');
-        }
-        const status = nextPurchaseOrderStatus(updatedItems);
-        transaction.set(purchaseOrderRef, {
-          ...purchaseOrder,
-          items: updatedItems,
-          status,
-          updatedAt: now,
-          ...(status === 'COMPLETED' ? { completedAt: now } : {}),
-        });
-      }
-      productEntries.forEach(([productId, product], index) => {
-        const before = inventorySnapshots[index].exists() ? Number(inventorySnapshots[index].data().quantity) : 0;
-        const quantity = product.quantity;
-        if (quantity <= 0) throw new Error(`Receipt quantity must be positive for ${product.productName}.`);
-        const after = before + quantity;
-        const priorAverage = Number(inventorySnapshots[index].data()?.averageUnitCost ?? productSnapshots[index].data()?.costPrice ?? (quantity ? product.totalCost / quantity : 0));
-        const averageUnitCost = weightedAverageCost(before, priorAverage, quantity, product.totalCost);
-        transaction.set(inventoryRefs[index], {
-          id: inventoryRefs[index].id,
-          vendorId,
-          warehouseId,
-          productId,
-          quantity: after,
-          averageUnitCost,
-          lastUpdated: now,
-        });
-        quantityDecisions.push({
-          productId,
-          productName: product.productName,
-          locationType: 'warehouse',
-          locationId: warehouseId,
-          beforeQuantity: before,
-          quantityDelta: quantity,
-          afterQuantity: after,
-        });
-      });
-      transaction.set(doc(db, 'vendors', vendorId, 'supplier_receipts', current.entityId), {
-        id: current.entityId,
+      const posting = await postApprovedSupplierReceiptInFirestoreTransaction(transaction, {
+        tenantId: String(snapshot.data().tenantId || '').trim(),
         vendorId,
-        warehouseId,
+        receiptId: current.entityId,
+        approvalRequestId: requestId,
+        warehouseId: warehouseId || '',
+        destinationType: current.branchId || payload.locationType === 'branch' ? 'branch' : 'warehouse',
+        supplierId: payload.supplierId,
         supplierName: payload.supplierName || '',
         referenceNo: payload.referenceNo || current.entityId,
         purchaseOrderId: payload.purchaseOrderId,
         purchaseOrderNumber: payload.purchaseOrderNumber,
-        date: now,
-        items: items.map(item => ({
-          ...item,
-          quantity: item.quantity || 0,
-          unitCost: item.unitCost || 0,
-          totalCost: (item.quantity || 0) * (item.unitCost || 0),
+        overReceiptExceptionApproved: payload.overReceiptExceptionRequested === true && Boolean(payload.overReceiptReason?.trim()) && (reviewer.role === 'sysadmin' || reviewer.role === 'manager'),
+        actor: current.requester,
+        requestedAt: current.requestedAt,
+        postedAt: now,
+        notes: payload.notes,
+        lines: items.map(item => ({
+          productId: item.productId,
+          productName: item.productName,
+          quantity: Number(item.quantity || 0),
+          unitCost: Number(item.unitCost || 0),
+          unitOfMeasure: item.unitOfMeasure,
+          batchNumber: item.batchNumber,
+          orderedQuantity: item.orderedQuantity,
+          previouslyReceivedQuantity: item.previouslyReceivedQuantity,
+          receiptClassification: item.receiptClassification,
         })),
-        totalAmount: items.reduce((sum, item) => sum + (item.quantity || 0) * (item.unitCost || 0), 0),
-        notes: payload.notes || '',
-        createdBy: current.requesterName,
-        status: 'COMPLETED',
-        createdAt: current.requestedAt,
       });
+      quantityDecisions.push(...posting.quantityDecisions);
     } else if (
       current.entityType === 'OPENING_BALANCE_ADJUSTMENT' ||
       current.entityType === 'STOCKTAKE_ADJUSTMENT'
@@ -2731,7 +2626,7 @@ export async function reviewApprovalRequest(
       );
       transaction.set(doc(db, 'vendors', vendorId, 'approval_events', event.id), event);
     }
-    quantityDecisions.forEach((quantity, index) => {
+    if (current.entityType !== 'SUPPLIER_STOCK_RECEIPT') quantityDecisions.forEach((quantity, index) => {
       const movementId = `${requestId}_${index}`;
       transaction.set(doc(db, 'vendors', vendorId, 'inventory_movements', movementId), {
         id: movementId,

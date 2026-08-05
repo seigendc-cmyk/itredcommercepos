@@ -5,7 +5,7 @@ $root = (Resolve-Path -LiteralPath $RootPath).Path
 $sourceRoot = Join-Path $root 'src'
 $collections = 'warehouse_inventory|branch_inventory|inventory_balances|inventory_balance'
 $writes = 'setDoc|updateDoc|addDoc|transaction\.(set|update)|batch\.(set|update)'
-$quantities = '(quantity|onHandQty|reservedQty|inTransitQty|quarantinedQty|damagedQty)\s*:'
+$quantities = '\b(quantity|onHandQty|reservedQty|inTransitQty|quarantinedQty|damagedQty)\s*:'
 $approvedPaths = '^src/features/inventory/(infrastructure|tests)/|^src/.*/(__tests__|fixtures)/|^src/migrations/'
 $findings = @()
 
@@ -26,6 +26,7 @@ Get-ChildItem $sourceRoot -Recurse -File -Include *.ts,*.tsx | ForEach-Object {
     $approved = $relative -eq 'src/services/db.ts' -or $relative -match $approvedPaths
     if ($relative -eq 'src/services/db.ts') { $classification = 'LEGACY_REQUIRES_MIGRATION' }
     elseif ($relative -eq 'src/features/inventory/infrastructure/firestoreSaleInventoryAdapter.ts') { $classification = 'APPROVED_CANONICAL_SALE_WRITE' }
+    elseif ($relative -eq 'src/features/inventory/infrastructure/firestoreSupplierReceiptAdapter.ts') { $classification = 'APPROVED_CANONICAL_SUPPLIER_RECEIPT_WRITE' }
     elseif ($approved) { $classification = 'APPROVED_BOUNDARY_WRITE' }
     else { $classification = 'PROHIBITED_DIRECT_WRITE' }
     $findings += [pscustomobject]@{ File=$relative; Line=$i+1; Classification=$classification; Approved=$approved; Match=$lines[$i].Trim() }

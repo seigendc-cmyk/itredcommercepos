@@ -289,6 +289,11 @@ export interface WarehouseInventory {
   warehouseId: string;
   productId: string;
   quantity: number;
+  reservedQuantity?: number;
+  inTransitQuantity?: number;
+  quarantinedQuantity?: number;
+  damagedQuantity?: number;
+  version?: number;
   averageUnitCost?: number;
   lastUpdated: string;
 }
@@ -299,6 +304,11 @@ export interface BranchInventory {
   branchId: string;
   productId: string;
   quantity: number;
+  reservedQuantity?: number;
+  inTransitQuantity?: number;
+  quarantinedQuantity?: number;
+  damagedQuantity?: number;
+  version?: number;
   averageUnitCost?: number;
   lastUpdated: string;
 }
@@ -321,6 +331,10 @@ export interface SupplierReceipt {
     sku?: string;
     orderedQuantity?: number;
     previouslyReceivedQuantity?: number;
+    currentReceiptQuantity?: number;
+    remainingQuantity?: number;
+    variance?: number;
+    receiptClassification?: 'ACCEPTED' | 'QUARANTINED' | 'DAMAGED';
     unitOfMeasure?: string;
     batchNumber?: string;
   }[];
@@ -633,6 +647,7 @@ export interface ApprovalInventoryItem {
   quantityDelta?: number;
   unitCost?: number;
   reason?: string;
+  receiptClassification?: 'ACCEPTED' | 'QUARANTINED' | 'DAMAGED';
   systemQty?: number;
   countedQty?: number;
 }
