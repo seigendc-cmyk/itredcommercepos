@@ -66,6 +66,7 @@ import {
   normalizeProduct
 } from '../types';
 import { logBIEvent } from '../bi/tracker';
+import { createVendorOwnerMembership } from '../auth/tenantMembership';
 import {
   completeSaleTransaction,
   SaleCompletionResult,
@@ -280,6 +281,10 @@ export async function onboardVendor(
     status: 'active',
     createdAt: now,
   };
+  const ownerMembership = createVendorOwnerMembership(vendorId, vendorId, now);
+  ownerMembership.assignedWarehouseIds = [warehouse.id];
+  ownerMembership.assignedBranchIds = [branch.id];
+  ownerMembership.assignedTerminalIds = [terminal.id];
 
   // Cache locally
   saveLocalVendor(vendorId, profile);
@@ -293,6 +298,9 @@ export async function onboardVendor(
 
   // Save to Firestore
   try {
+    // Membership is the tenant authority. The rules allow this single owner
+    // bootstrap only while the UID-named vendor document does not yet exist.
+    await setDoc(doc(db, 'vendors', vendorId, 'memberships', vendorId), ownerMembership);
     await setDoc(doc(db, 'vendors', vendorId), profile);
     await setDoc(doc(db, 'vendors', vendorId, 'warehouses', warehouse.id), warehouse);
     await setDoc(doc(db, 'vendors', vendorId, 'branches', branch.id), branch);

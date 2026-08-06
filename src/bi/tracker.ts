@@ -49,6 +49,7 @@ export async function logBIEvent(
 
   const event: BIEvent = {
     id,
+    tenantId: vendorId,
     vendorId,
     eventType,
     actionSummary,
