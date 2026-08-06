@@ -1,19 +1,409 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Vendors root and all sub-collections
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function membershipPath(vendorId) {
+      return /databases/$(database)/documents/vendors/$(vendorId)/memberships/$(request.auth.uid);
+    }
+
+    function membership(vendorId) {
+      return get(membershipPath(vendorId));
+    }
+
+    function isActiveMember(vendorId) {
+      return signedIn()
+        && exists(membershipPath(vendorId))
+        && membership(vendorId).data.tenantId == vendorId
+        && membership(vendorId).data.vendorId == vendorId
+        && membership(vendorId).data.userUid == request.auth.uid
+        && membership(vendorId).data.status == 'ACTIVE'
+        && membership(vendorId).data.permissions is list
+        && membership(vendorId).data.assignedWarehouseIds is list
+        && membership(vendorId).data.assignedBranchIds is list
+        && membership(vendorId).data.assignedTerminalIds is list;
+    }
+
+    function hasPermission(vendorId, permission) {
+      return isActiveMember(vendorId)
+        && permission in membership(vendorId).data.permissions;
+    }
+
+    function hasAnyPermission(vendorId, permissions) {
+      return isActiveMember(vendorId)
+        && membership(vendorId).data.permissions.hasAny(permissions);
+    }
+
+    function hasAllLocations(vendorId) {
+      return hasPermission(vendorId, 'location.all');
+    }
+
+    function canAccessWarehouse(vendorId, warehouseId) {
+      return isActiveMember(vendorId)
+        && warehouseId is string
+        && (hasAllLocations(vendorId)
+          || warehouseId in membership(vendorId).data.assignedWarehouseIds);
+    }
+
+    function canAccessBranch(vendorId, branchId) {
+      return isActiveMember(vendorId)
+        && branchId is string
+        && (hasAllLocations(vendorId)
+          || branchId in membership(vendorId).data.assignedBranchIds);
+    }
+
+    function canAccessTerminal(vendorId, terminalId, branchId) {
+      return canAccessBranch(vendorId, branchId)
+        && (hasAllLocations(vendorId)
+          || terminalId in membership(vendorId).data.assignedTerminalIds);
+    }
+
+    function canAccessStockLocation(vendorId, locationId) {
+      return (exists(/databases/$(database)/documents/vendors/$(vendorId)/warehouses/$(locationId))
+          && canAccessWarehouse(vendorId, locationId))
+        || (exists(/databases/$(database)/documents/vendors/$(vendorId)/branches/$(locationId))
+          && canAccessBranch(vendorId, locationId));
+    }
+
+    function tenantRecord(vendorId, data) {
+      return data.vendorId == vendorId
+        && (!('tenantId' in data) || data.tenantId == vendorId);
+    }
+
+    function immutableTenantRecord(vendorId, data) {
+      return data.vendorId == vendorId && data.tenantId == vendorId;
+    }
+
+    function validMembership(vendorId, userUid, data) {
+      return data.tenantId == vendorId
+        && data.vendorId == vendorId
+        && data.userUid == userUid
+        && data.status in ['INVITED', 'ACTIVE', 'SUSPENDED', 'REVOKED', 'EXPIRED']
+        && data.roleId is string
+        && data.permissionVersion is int
+        && data.permissions is list
+        && data.assignedWarehouseIds is list
+        && data.assignedBranchIds is list
+        && data.assignedTerminalIds is list;
+    }
+
+    function bootstrapOwner(vendorId, userUid, data) {
+      return signedIn()
+        && request.auth.uid == vendorId
+        && userUid == request.auth.uid
+        && !exists(/databases/$(database)/documents/vendors/$(vendorId))
+        && data.roleId == 'sysadmin'
+        && data.status == 'ACTIVE'
+        && 'tenant.manage' in data.permissions
+        && 'staff.manage' in data.permissions
+        && validMembership(vendorId, userUid, data);
+    }
+
+    function eventLocationAllowed(vendorId, data) {
+      return ('warehouseId' in data && data.warehouseId != null)
+        ? canAccessWarehouse(vendorId, data.warehouseId)
+        : (('branchId' in data && data.branchId != null)
+          ? canAccessBranch(vendorId, data.branchId)
+          : hasAllLocations(vendorId));
+    }
+
+    function transferLocationsAllowed(vendorId, data) {
+      return ('sourceWarehouseId' in data && data.sourceWarehouseId != null && data.sourceWarehouseId != '')
+        ? canAccessWarehouse(vendorId, data.sourceWarehouseId)
+            && canAccessBranch(vendorId, data.targetBranchId)
+        : ('sourceBranchId' in data && data.sourceBranchId != null && data.sourceBranchId != '')
+          && canAccessBranch(vendorId, data.sourceBranchId)
+          && canAccessBranch(vendorId, data.targetBranchId);
+    }
+
+    function approvalLocationAllowed(vendorId, data) {
+      return ('warehouseId' in data && data.warehouseId != null && data.warehouseId != '')
+        ? canAccessWarehouse(vendorId, data.warehouseId)
+        : (('branchId' in data && data.branchId != null && data.branchId != '')
+          ? canAccessBranch(vendorId, data.branchId)
+          : hasAllLocations(vendorId));
+    }
+
     match /vendors/{vendorId} {
-      allow read, write: if request.auth != null;
-      
-      match /{allPaths=**} {
-        allow read, write: if request.auth != null;
+      allow create: if signedIn()
+        && request.auth.uid == vendorId
+        && request.resource.data.id == vendorId;
+      allow read: if isActiveMember(vendorId);
+      allow update: if hasPermission(vendorId, 'tenant.manage')
+        && request.resource.data.id == vendorId;
+      allow delete: if false;
+
+      match /memberships/{userUid} {
+        allow get: if isActiveMember(vendorId)
+          && (request.auth.uid == userUid || hasPermission(vendorId, 'staff.manage'));
+        allow list: if hasPermission(vendorId, 'staff.manage');
+        allow create: if bootstrapOwner(vendorId, userUid, request.resource.data)
+          || (hasPermission(vendorId, 'staff.manage')
+            && validMembership(vendorId, userUid, request.resource.data));
+        allow update: if hasPermission(vendorId, 'staff.manage')
+          && validMembership(vendorId, userUid, request.resource.data)
+          && request.resource.data.tenantId == resource.data.tenantId
+          && request.resource.data.vendorId == resource.data.vendorId
+          && request.resource.data.userUid == resource.data.userUid;
+        allow delete: if false;
+      }
+
+      match /roles/{roleId} {
+        allow read: if isActiveMember(vendorId);
+        allow create, update: if hasPermission(vendorId, 'staff.manage')
+          && tenantRecord(vendorId, request.resource.data);
+        allow delete: if false;
+      }
+
+      match /permissions/{permissionId} {
+        allow read: if isActiveMember(vendorId);
+        allow create, update: if hasPermission(vendorId, 'staff.manage')
+          && tenantRecord(vendorId, request.resource.data);
+        allow delete: if false;
+      }
+
+      match /staff/{staffId} {
+        allow read: if hasAnyPermission(vendorId, ['staff.view', 'staff.manage']);
+        allow create, update: if hasPermission(vendorId, 'staff.manage')
+          && tenantRecord(vendorId, request.resource.data)
+          && (!('assignedBranchId' in request.resource.data)
+            || request.resource.data.assignedBranchId == null
+            || request.resource.data.assignedBranchId == ''
+            || canAccessBranch(vendorId, request.resource.data.assignedBranchId));
+        allow delete: if false;
+      }
+
+      match /warehouses/{warehouseId} {
+        allow read: if canAccessWarehouse(vendorId, warehouseId);
+        allow create, update: if hasPermission(vendorId, 'location.manage')
+          && canAccessWarehouse(vendorId, warehouseId)
+          && tenantRecord(vendorId, request.resource.data)
+          && request.resource.data.id == warehouseId;
+        allow delete: if false;
+      }
+
+      match /branches/{branchId} {
+        allow read: if canAccessBranch(vendorId, branchId);
+        allow create, update: if hasPermission(vendorId, 'location.manage')
+          && canAccessBranch(vendorId, branchId)
+          && tenantRecord(vendorId, request.resource.data)
+          && request.resource.data.id == branchId;
+        allow delete: if false;
+      }
+
+      match /terminals/{terminalId} {
+        allow read: if tenantRecord(vendorId, resource.data)
+          && canAccessTerminal(vendorId, terminalId, resource.data.branchId);
+        allow create, update: if hasPermission(vendorId, 'location.manage')
+          && tenantRecord(vendorId, request.resource.data)
+          && request.resource.data.id == terminalId
+          && canAccessTerminal(vendorId, terminalId, request.resource.data.branchId);
+        allow delete: if false;
+      }
+
+      match /products/{productId} {
+        allow read: if isActiveMember(vendorId);
+        allow create, update: if hasPermission(vendorId, 'product.manage')
+          && tenantRecord(vendorId, request.resource.data);
+        allow delete: if false;
+      }
+
+      match /suppliers/{supplierId} {
+        allow read: if isActiveMember(vendorId);
+        allow create, update: if hasPermission(vendorId, 'supplier.create')
+          && tenantRecord(vendorId, request.resource.data);
+        allow delete: if false;
+      }
+
+      // Inventory balances are server-owned projections. Admin SDK trusted
+      // commands bypass these rules; ordinary web clients never write them.
+      match /warehouse_inventory/{balanceId} {
+        allow read: if tenantRecord(vendorId, resource.data)
+          && canAccessWarehouse(vendorId, resource.data.warehouseId);
+        allow create, update, delete: if false;
+      }
+
+      match /branch_inventory/{balanceId} {
+        allow read: if tenantRecord(vendorId, resource.data)
+          && canAccessBranch(vendorId, resource.data.branchId);
+        allow create, update, delete: if false;
+      }
+
+      match /inventory_balances/{balanceId} {
+        allow read: if immutableTenantRecord(vendorId, resource.data)
+          && canAccessStockLocation(vendorId, resource.data.stockLocationId);
+        allow create, update, delete: if false;
+      }
+
+      match /inventory_balance/{balanceId} {
+        allow read: if immutableTenantRecord(vendorId, resource.data)
+          && canAccessStockLocation(vendorId, resource.data.stockLocationId);
+        allow create, update, delete: if false;
+      }
+
+      // Ledger movements are create-only through trusted server commands.
+      match /inventory_movements/{movementId} {
+        allow read: if immutableTenantRecord(vendorId, resource.data)
+          && (('locationId' in resource.data
+              && canAccessStockLocation(vendorId, resource.data.locationId))
+            || ('sourceLocationId' in resource.data
+              && canAccessStockLocation(vendorId, resource.data.sourceLocationId))
+            || ('destinationLocationId' in resource.data
+              && canAccessStockLocation(vendorId, resource.data.destinationLocationId)));
+        allow create, update, delete: if false;
+      }
+
+      match /purchase_orders/{purchaseOrderId} {
+        allow read: if tenantRecord(vendorId, resource.data)
+          && canAccessWarehouse(vendorId, resource.data.destinationWarehouseId);
+        allow create: if hasPermission(vendorId, 'purchase_order.create')
+          && tenantRecord(vendorId, request.resource.data)
+          && canAccessWarehouse(vendorId, request.resource.data.destinationWarehouseId);
+        allow update: if hasPermission(vendorId, 'purchase_order.approve')
+          && tenantRecord(vendorId, request.resource.data)
+          && canAccessWarehouse(vendorId, request.resource.data.destinationWarehouseId);
+        allow delete: if false;
+      }
+
+      match /supplier_receipts/{receiptId} {
+        allow read: if tenantRecord(vendorId, resource.data)
+          && canAccessWarehouse(vendorId, resource.data.warehouseId);
+        allow create: if hasPermission(vendorId, 'receiving.create')
+          && tenantRecord(vendorId, request.resource.data)
+          && canAccessWarehouse(vendorId, request.resource.data.warehouseId);
+        allow update: if hasPermission(vendorId, 'receiving.approve')
+          && tenantRecord(vendorId, request.resource.data)
+          && canAccessWarehouse(vendorId, request.resource.data.warehouseId);
+        allow delete: if false;
+      }
+
+      match /transfers/{transferId} {
+        allow read: if tenantRecord(vendorId, resource.data)
+          && transferLocationsAllowed(vendorId, resource.data);
+        allow create: if hasPermission(vendorId, 'transfer.create')
+          && tenantRecord(vendorId, request.resource.data)
+          && transferLocationsAllowed(vendorId, request.resource.data);
+        allow update: if hasAnyPermission(vendorId, ['transfer.dispatch', 'transfer.receive'])
+          && tenantRecord(vendorId, request.resource.data)
+          && transferLocationsAllowed(vendorId, request.resource.data);
+        allow delete: if false;
+      }
+
+      match /stocktakes/{stocktakeId} {
+        allow read: if tenantRecord(vendorId, resource.data)
+          && canAccessStockLocation(vendorId, resource.data.stockLocationId);
+        allow create, update: if hasAnyPermission(vendorId, ['stocktake.count', 'stocktake.approve'])
+          && tenantRecord(vendorId, request.resource.data)
+          && canAccessStockLocation(vendorId, request.resource.data.stockLocationId);
+        allow delete: if false;
+      }
+
+      match /approval_requests/{approvalId} {
+        allow read: if approvalLocationAllowed(vendorId, resource.data);
+        allow create: if hasPermission(vendorId, 'approval.create')
+          && immutableTenantRecord(vendorId, request.resource.data)
+          && approvalLocationAllowed(vendorId, request.resource.data);
+        allow update: if hasPermission(vendorId, 'approval.decide')
+          && immutableTenantRecord(vendorId, request.resource.data)
+          && approvalLocationAllowed(vendorId, request.resource.data);
+        allow delete: if false;
+      }
+
+      match /orders/{saleId} {
+        allow read: if tenantRecord(vendorId, resource.data)
+          && canAccessBranch(vendorId, resource.data.branchId);
+        allow create, update: if hasPermission(vendorId, 'sale.complete')
+          && tenantRecord(vendorId, request.resource.data)
+          && canAccessBranch(vendorId, request.resource.data.branchId);
+        allow delete: if false;
+      }
+
+      match /sales/{saleId} {
+        allow read: if immutableTenantRecord(vendorId, resource.data)
+          && canAccessBranch(vendorId, resource.data.branchId);
+        allow create, update: if hasPermission(vendorId, 'sale.complete')
+          && immutableTenantRecord(vendorId, request.resource.data)
+          && canAccessBranch(vendorId, request.resource.data.branchId);
+        allow delete: if false;
+      }
+
+      match /payments/{paymentId} {
+        allow read: if immutableTenantRecord(vendorId, resource.data)
+          && canAccessBranch(vendorId, resource.data.branchId);
+        allow create: if hasPermission(vendorId, 'payment.create')
+          && immutableTenantRecord(vendorId, request.resource.data)
+          && canAccessBranch(vendorId, request.resource.data.branchId);
+        allow update, delete: if false;
+      }
+
+      match /shifts/{shiftId} {
+        allow read: if tenantRecord(vendorId, resource.data)
+          && canAccessBranch(vendorId, resource.data.branchId);
+        allow create, update: if hasAnyPermission(vendorId, ['shift.open', 'shift.close'])
+          && tenantRecord(vendorId, request.resource.data)
+          && canAccessBranch(vendorId, request.resource.data.branchId);
+        allow delete: if false;
+      }
+
+      match /bi_logs/{eventId} {
+        allow read: if hasPermission(vendorId, 'bi.view')
+          && eventLocationAllowed(vendorId, resource.data);
+        allow create: if hasPermission(vendorId, 'bi.event.create')
+          && immutableTenantRecord(vendorId, request.resource.data)
+          && eventLocationAllowed(vendorId, request.resource.data);
+        allow update, delete: if false;
+      }
+
+      match /bi_events/{eventId} {
+        allow read: if hasPermission(vendorId, 'bi.view')
+          && eventLocationAllowed(vendorId, resource.data);
+        allow create: if hasPermission(vendorId, 'bi.event.create')
+          && immutableTenantRecord(vendorId, request.resource.data)
+          && eventLocationAllowed(vendorId, request.resource.data);
+        allow update, delete: if false;
+      }
+
+      match /approval_events/{eventId} {
+        allow read: if hasPermission(vendorId, 'audit.view')
+          && eventLocationAllowed(vendorId, resource.data);
+        allow create: if hasPermission(vendorId, 'audit.event.create')
+          && immutableTenantRecord(vendorId, request.resource.data)
+          && eventLocationAllowed(vendorId, request.resource.data);
+        allow update, delete: if false;
+      }
+
+      match /audit_events/{eventId} {
+        allow read: if hasPermission(vendorId, 'audit.view')
+          && eventLocationAllowed(vendorId, resource.data);
+        allow create: if hasPermission(vendorId, 'audit.event.create')
+          && immutableTenantRecord(vendorId, request.resource.data)
+          && eventLocationAllowed(vendorId, request.resource.data);
+        allow update, delete: if false;
+      }
+
+      match /settings/{settingId} {
+        allow read: if isActiveMember(vendorId);
+        allow create, update: if hasPermission(vendorId, 'settings.manage');
+        allow delete: if false;
+      }
+
+      match /billing/{documentId} {
+        allow read: if isActiveMember(vendorId);
+        allow create, update: if hasPermission(vendorId, 'billing.manage');
+        allow delete: if false;
+      }
+
+      // Any operational collection not explicitly classified above fails closed.
+      match /{document=**} {
+        allow read, write: if false;
       }
     }
-    
-    // General fallback for any authenticated user
+
     match /{document=**} {
-      allow read, write: if request.auth != null;
+      allow read, write: if false;
     }
   }
 }

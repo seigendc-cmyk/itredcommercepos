@@ -96,6 +96,7 @@ export type BIEventType =
 
 export interface BIEvent {
   id: string;
+  tenantId: string;
   vendorId: string;
   eventType: BIEventType;
   actionSummary: string;
