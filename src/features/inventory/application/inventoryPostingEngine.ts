@@ -35,6 +35,12 @@ export class InventoryPostingEngine {
       const destinationAffected = Boolean(command.destinationLocationId) && command.movementType !== 'TRANSFER_DISPATCH';
       const sourceBalance = sourceAffected ? await this.getOrCreateBalance(repository, command, command.sourceLocationId!, recordedAt) : undefined;
       const destinationBalance = command.destinationLocationId ? await this.getOrCreateBalance(repository, command, command.destinationLocationId, recordedAt) : undefined;
+      if (sourceBalance && command.expectedSourceVersion !== undefined && sourceBalance.version !== command.expectedSourceVersion) {
+        throw new InventoryDomainError('STALE_BALANCE', 'Source inventory changed after the command was prepared.');
+      }
+      if (destinationBalance && command.expectedDestinationVersion !== undefined && destinationBalance.version !== command.expectedDestinationVersion) {
+        throw new InventoryDomainError('STALE_BALANCE', 'Destination inventory changed after the command was prepared.');
+      }
       if (sourceBalance && sourceBalance.onHandQty < command.quantity) throw new InventoryDomainError('INSUFFICIENT_STOCK', 'Source location has insufficient stock.');
       if (command.movementType === 'TRANSFER_RECEIPT' && destinationBalance && destinationBalance.inTransitQty < command.quantity) {
         throw new InventoryDomainError('INSUFFICIENT_STOCK', 'Destination location has insufficient in-transit stock.');
@@ -59,13 +65,22 @@ export class InventoryPostingEngine {
           updatedAt: recordedAt,
         });
       }
+      const primaryLocation = updatedSource ? source! : destination!;
+      const beforeQuantity = updatedSource ? sourceBalance!.onHandQty : this.bucketQuantity(destinationBalance!, destinationBucket);
+      const afterQuantity = updatedSource ? updatedSource.onHandQty : this.bucketQuantity(updatedDestination!, destinationBucket);
+      const quantityDelta = afterQuantity - beforeQuantity;
       const movement = immutableInventoryMovement({
         id: command.commandId, idempotencyKey: command.idempotencyKey, tenantId: command.tenantId, vendorId: command.vendorId,
         productId: command.productId, sourceLocationId: command.sourceLocationId, destinationLocationId: command.destinationLocationId,
         movementType: command.movementType, quantity: command.quantity, quantityBucket: command.quantityBucket, sourceBeforeQty: sourceBalance?.onHandQty,
         sourceAfterQty: updatedSource?.onHandQty, destinationBeforeQty: destinationBalance ? this.bucketQuantity(destinationBalance, destinationBucket) : undefined,
         destinationAfterQty: updatedDestination ? this.bucketQuantity(updatedDestination, destinationBucket) : undefined, referenceType: command.referenceType, referenceId: command.referenceId,
-        actorId: command.actorId, approvalRequestId: command.approvalRequestId, status: 'POSTED', occurredAt: command.occurredAt, recordedAt,
+        actorId: command.actorId, approvalRequestId: command.approvalRequestId,
+        locationId: primaryLocation.id, locationType: primaryLocation.type, quantityDelta, beforeQuantity, afterQuantity,
+        sourceType: command.referenceType, sourceId: command.referenceId,
+        correlationId: command.correlationId || command.idempotencyKey, reasonCode: command.reasonCode,
+        reversalOfMovementId: command.reversalOfMovementId,
+        status: 'POSTED', occurredAt: command.occurredAt, recordedAt,
       });
       for (const balance of [updatedSource, updatedDestination]) if (balance) await repository.saveBalance(balance);
       await repository.saveMovement(movement);

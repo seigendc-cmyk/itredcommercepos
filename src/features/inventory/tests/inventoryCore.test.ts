@@ -58,11 +58,13 @@ test('supplier receipt accepts a warehouse and rejects a branch', async () => {
   await rejectsCode(engine().engine.post(command({ destinationLocationId: branch.id })), 'INVALID_ROUTE');
 });
 
-test('transfer route accepts warehouse-to-branch and rejects branch-to-branch', async () => {
+test('transfer route accepts warehouse-to-branch and controlled branch-to-branch', async () => {
   const accepted = engine();
   accepted.repository.balances.set(deterministicInventoryBalanceId({ tenantId: 'tenant-1', vendorId: 'vendor-1', stockLocationId: warehouse.id, productId: 'product-1' }), { ...emptyInventoryBalance({ tenantId: 'tenant-1', vendorId: 'vendor-1', stockLocationId: warehouse.id, productId: 'product-1' }, NOW), onHandQty: 10 });
   assert.equal((await accepted.engine.post(command({ movementType: 'TRANSFER_DISPATCH', sourceLocationId: warehouse.id, destinationLocationId: branch.id }))).duplicate, false);
-  await rejectsCode(engine().engine.post(command({ movementType: 'TRANSFER_DISPATCH', sourceLocationId: branch.id, destinationLocationId: branch2.id })), 'INVALID_ROUTE');
+  const branchTransfer = engine();
+  branchTransfer.repository.balances.set(deterministicInventoryBalanceId({ tenantId: 'tenant-1', vendorId: 'vendor-1', stockLocationId: branch.id, productId: 'product-1' }), { ...emptyInventoryBalance({ tenantId: 'tenant-1', vendorId: 'vendor-1', stockLocationId: branch.id, productId: 'product-1' }, NOW), onHandQty: 10 });
+  assert.equal((await branchTransfer.engine.post(command({ movementType: 'TRANSFER_DISPATCH', sourceLocationId: branch.id, destinationLocationId: branch2.id }))).duplicate, false);
 });
 
 test('sale source must be a branch', async () => {
@@ -88,6 +90,13 @@ test('posting records canonical before and after quantities', async () => {
   assert.equal(result.movement.destinationBeforeQty, 0);
   assert.equal(result.movement.destinationAfterQty, 5);
   assert.equal(result.balances[0].version, 1);
+});
+
+test('expected balance version rejects a stale command before posting', async () => {
+  const context = engine();
+  await rejectsCode(context.engine.post(command({ expectedDestinationVersion: 4 })), 'STALE_BALANCE');
+  assert.equal(context.repository.movements.size, 0);
+  assert.equal(context.repository.balances.size, 0);
 });
 
 test('tenant mismatch is rejected', async () => {

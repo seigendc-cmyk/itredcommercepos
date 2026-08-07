@@ -1,7 +1,8 @@
 export type InventoryErrorCode =
   | 'INVALID_IDENTITY' | 'INVALID_QUANTITY' | 'INVALID_BALANCE' | 'INVALID_ROUTE'
   | 'PRODUCT_NOT_FOUND' | 'LOCATION_NOT_FOUND' | 'LOCATION_OWNERSHIP_MISMATCH'
-  | 'LOCATION_INACTIVE' | 'LOCATION_UNLICENSED' | 'INSUFFICIENT_STOCK';
+  | 'LOCATION_INACTIVE' | 'LOCATION_UNLICENSED' | 'INSUFFICIENT_STOCK'
+  | 'STALE_BALANCE' | 'IDEMPOTENCY_CONFLICT';
 
 export class InventoryDomainError extends Error {
   constructor(public readonly code: InventoryErrorCode, message: string) {

@@ -1,9 +1,10 @@
-﻿import { getApp, getApps, initializeApp } from "firebase/app";
+import { getApp, getApps, initializeApp } from "firebase/app";
 import {
   getAuth,
   GoogleAuthProvider,
 } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
+import { getFunctions } from 'firebase/functions';
 import { getStorage } from "firebase/storage";
 import {
   requireFirebaseConfiguration,
@@ -46,3 +47,7 @@ export const firebaseProjectId =
   firebaseConfig.projectId;
 
 export default app;
+
+
+
+export const functions = getFunctions(app);
