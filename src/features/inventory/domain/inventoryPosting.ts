@@ -8,6 +8,8 @@ export interface InventoryPostingCommand {
   movementType: InventoryMovementType; quantity: number; sourceLocationId?: string; destinationLocationId?: string;
   quantityBucket?: InventoryQuantityBucket;
   referenceType: string; referenceId: string; actorId: string; approvalRequestId?: string; occurredAt: string;
+  correlationId?: string; reasonCode?: string; reversalOfMovementId?: string;
+  expectedSourceVersion?: number; expectedDestinationVersion?: number;
 }
 export interface InventoryPostingResult { movement: InventoryMovement; balances: InventoryBalance[]; duplicate: boolean; }
 
@@ -21,6 +23,10 @@ export function validateInventoryPostingCommand(command: InventoryPostingCommand
   if (command.quantityBucket && command.quantityBucket !== 'ON_HAND' && command.movementType !== 'SUPPLIER_RECEIPT') throw new InventoryDomainError('INVALID_ROUTE', 'Only supplier receipts may post directly to quarantined or damaged stock.');
   if (command.sourceLocationId !== undefined) requireInventoryIdentity(command.sourceLocationId, 'sourceLocationId');
   if (command.destinationLocationId !== undefined) requireInventoryIdentity(command.destinationLocationId, 'destinationLocationId');
+  for (const version of [command.expectedSourceVersion, command.expectedDestinationVersion]) {
+    if (version !== undefined && (!Number.isInteger(version) || version < 0)) throw new InventoryDomainError('STALE_BALANCE', 'Expected balance versions must be non-negative integers.');
+  }
+  if (command.reversalOfMovementId !== undefined) requireInventoryIdentity(command.reversalOfMovementId, 'reversalOfMovementId');
   return command;
 }
 
@@ -36,8 +42,8 @@ export function validateInventoryMovementRoute(command: InventoryPostingCommand,
   if (command.movementType === 'SALE' && source?.type !== 'BRANCH') throw new InventoryDomainError('INVALID_ROUTE', 'SALE source must be a branch.');
   if (command.movementType === 'SUPPLIER_RECEIPT' && destination?.type !== 'WAREHOUSE') throw new InventoryDomainError('INVALID_ROUTE', 'SUPPLIER_RECEIPT destination must be a warehouse.');
   if (command.movementType === 'TRANSFER_DISPATCH' || command.movementType === 'TRANSFER_RECEIPT') {
-    if (!hasSource || !hasDestination || source?.type !== 'WAREHOUSE' || destination?.type !== 'BRANCH' || source.id === destination.id) {
-      throw new InventoryDomainError('INVALID_ROUTE', `${command.movementType} requires a warehouse source and branch destination.`);
+    if (!hasSource || !hasDestination || !source || source.type === undefined || destination?.type !== 'BRANCH' || source.id === destination.id) {
+      throw new InventoryDomainError('INVALID_ROUTE', `${command.movementType} requires a distinct warehouse-or-branch source and branch destination.`);
     }
   }
   if (command.movementType === 'STOCKTAKE_ADJUSTMENT' || command.movementType === 'MANUAL_ADJUSTMENT') {

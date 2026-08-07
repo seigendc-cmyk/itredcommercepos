@@ -1,4 +1,4 @@
-export type InventoryMovementType = 'OPENING_BALANCE' | 'SUPPLIER_RECEIPT' | 'TRANSFER_DISPATCH' | 'TRANSFER_RECEIPT' | 'SALE' | 'SALE_REVERSAL' | 'CUSTOMER_RETURN' | 'SUPPLIER_RETURN' | 'STOCKTAKE_ADJUSTMENT' | 'DAMAGE_WRITE_OFF' | 'MANUAL_ADJUSTMENT';
+export type InventoryMovementType = 'OPENING_BALANCE' | 'SUPPLIER_RECEIPT' | 'TRANSFER_DISPATCH' | 'TRANSFER_RECEIPT' | 'TRANSFER_REVERSAL' | 'SALE' | 'SALE_REVERSAL' | 'CUSTOMER_RETURN' | 'SUPPLIER_RETURN' | 'STOCKTAKE_ADJUSTMENT' | 'DAMAGE_WRITE_OFF' | 'MANUAL_ADJUSTMENT';
 export type InventoryMovementStatus = 'POSTED';
 export type InventoryQuantityBucket = 'ON_HAND' | 'QUARANTINED' | 'DAMAGED';
 
@@ -8,6 +8,9 @@ export interface InventoryMovement {
   readonly quantityBucket?: InventoryQuantityBucket;
   readonly sourceBeforeQty?: number; readonly sourceAfterQty?: number; readonly destinationBeforeQty?: number; readonly destinationAfterQty?: number;
   readonly referenceType: string; readonly referenceId: string; readonly actorId: string; readonly approvalRequestId?: string;
+  readonly locationId: string; readonly locationType: 'WAREHOUSE' | 'BRANCH'; readonly quantityDelta: number;
+  readonly beforeQuantity: number; readonly afterQuantity: number; readonly sourceType: string; readonly sourceId: string;
+  readonly correlationId: string; readonly reasonCode?: string; readonly reversalOfMovementId?: string;
   readonly status: InventoryMovementStatus; readonly occurredAt: string; readonly recordedAt: string;
 }
 

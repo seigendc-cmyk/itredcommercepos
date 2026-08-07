@@ -286,10 +286,12 @@ service cloud.firestore {
         allow create: if hasPermission(vendorId, 'transfer.create')
           && tenantRecord(vendorId, request.resource.data)
           && transferLocationsAllowed(vendorId, request.resource.data);
-        allow update: if hasAnyPermission(vendorId, ['transfer.dispatch', 'transfer.receive'])
-          && tenantRecord(vendorId, request.resource.data)
-          && transferLocationsAllowed(vendorId, request.resource.data);
+        allow update: if false;
         allow delete: if false;
+      }
+
+      match /transfer_commands/{commandId} {
+        allow read, write: if false;
       }
 
       match /stocktakes/{stocktakeId} {

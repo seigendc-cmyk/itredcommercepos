@@ -8,7 +8,13 @@ import {
   TransferSlipAction,
   TransferSlipFormat,
 } from '../../services/transferSlip';
-import { confirmStockTransferReceipt, dispatchStockTransfer } from '../../services/db';
+import {
+  dispatchTransferCommand,
+  receiveTransferCommand,
+  recordTransferDiscrepancyCommand,
+  reconcileTransferCommand,
+  reverseTransferCommand,
+} from '../../services/transferCommands';
 import { TransferReceiptModal } from './TransferReceiptModal';
 import { matchesPredictiveSearch } from '../../features/products';
 
@@ -318,12 +324,7 @@ export const WarehouseManagement: React.FC<WarehouseManagementProps> = ({
                             event.stopPropagation();
                             setProcessingTransferId(trf.id);
                             try {
-                              await dispatchStockTransfer(
-                                vendor.id,
-                                trf.id,
-                                { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role },
-                                trf.version || 1,
-                              );
+                              await dispatchTransferCommand(vendor.id, trf.id);
                               await onTransferUpdated();
                             } catch (reason: unknown) {
                               alert(reason instanceof Error ? reason.message : 'Transfer dispatch failed.');
@@ -336,7 +337,7 @@ export const WarehouseManagement: React.FC<WarehouseManagementProps> = ({
                         </button>
                       )}
                       {(String(trf.status).toUpperCase() === 'IN_TRANSIT' ||
-                        String(trf.status).toUpperCase() === 'PARTIALLY_RECEIVED') && (
+                        String(trf.status).toUpperCase() === 'RECEIVING') && (
                         <button type="button" onClick={event => {
                           event.stopPropagation();
                           setReceivingTransfer(trf);
@@ -345,6 +346,32 @@ export const WarehouseManagement: React.FC<WarehouseManagementProps> = ({
                           Confirm receipt
                         </button>
                       )}
+                      {['IN_TRANSIT', 'RECEIVING', 'DISPUTED'].includes(String(trf.status).toUpperCase()) && (
+                        <button type="button" onClick={async event => {
+                          event.stopPropagation();
+                          const lineIndex = Number(prompt('Discrepancy line number (starting at 1):', '1')) - 1;
+                          const quantity = Number(prompt('Disputed quantity:', '1'));
+                          const type = prompt('Type: SHORTAGE, DAMAGE, LOSS, or QUANTITY_DISAGREEMENT', 'SHORTAGE')?.toUpperCase();
+                          const reason = prompt('Discrepancy reason:') || '';
+                          if (lineIndex < 0 || quantity <= 0 || !reason || !['SHORTAGE','DAMAGE','LOSS','QUANTITY_DISAGREEMENT'].includes(type || '')) return;
+                          await recordTransferDiscrepancyCommand(vendor.id, trf.id, lineIndex, type as 'SHORTAGE' | 'DAMAGE' | 'LOSS' | 'QUANTITY_DISAGREEMENT', quantity, reason);
+                          await onTransferUpdated();
+                        }} className="ml-2 rounded-lg border border-amber-500 px-3 py-1.5 text-xs font-bold text-amber-700">Discrepancy</button>
+                      )}
+                      {['IN_TRANSIT', 'RECEIVING', 'RECEIVED', 'COMPLETED', 'DISPUTED'].includes(String(trf.status).toUpperCase()) && (
+                        <button type="button" onClick={async event => {
+                          event.stopPropagation();
+                          const reason = prompt('Reason for compensating reversal:') || '';
+                          if (!reason) return;
+                          await reverseTransferCommand(vendor.id, trf.id, reason);
+                          await onTransferUpdated();
+                        }} className="ml-2 rounded-lg border border-red-500 px-3 py-1.5 text-xs font-bold text-red-700">Reverse</button>
+                      )}
+                      <button type="button" onClick={async event => {
+                        event.stopPropagation();
+                        const result = await reconcileTransferCommand(vendor.id, trf.id);
+                        alert(result.reconciled ? 'Transfer reconciles.' : 'Transfer ledger divergence detected.');
+                      }} className="ml-2 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-bold text-slate-700">Reconcile</button>
                     </td>
                   </tr>
                   );
@@ -374,14 +401,7 @@ export const WarehouseManagement: React.FC<WarehouseManagementProps> = ({
         transfer={receivingTransfer}
         onClose={() => setReceivingTransfer(null)}
         onConfirm={async (transfer, receipts, reason) => {
-          await confirmStockTransferReceipt(
-            vendor.id,
-            transfer.id,
-            { id: activeStaff.id, name: activeStaff.name, role: activeStaff.role },
-            transfer.version || 1,
-            receipts,
-            reason,
-          );
+          await receiveTransferCommand(vendor.id, transfer.id, receipts, reason);
           await onTransferUpdated();
         }}
       />
