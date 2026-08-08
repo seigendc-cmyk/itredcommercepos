@@ -45,11 +45,12 @@ EXPIRED
 
 ```text
 DRAFT
+â†’ SUBMITTED
 â†’ PENDING_APPROVAL
 â†’ APPROVED
 â†’ ISSUED
 â†’ PARTIALLY_RECEIVED
-â†’ FULLY_RECEIVED
+â†’ RECEIVED
 â†’ CLOSED
 ```
 
@@ -58,8 +59,7 @@ Exceptions:
 ```text
 REJECTED
 CANCELLED
-EXPIRED
-DISPUTED
+FAILED
 ```
 
 ## Supplier receipt
