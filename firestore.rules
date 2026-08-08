@@ -259,25 +259,19 @@ service cloud.firestore {
       match /purchase_orders/{purchaseOrderId} {
         allow read: if tenantRecord(vendorId, resource.data)
           && canAccessWarehouse(vendorId, resource.data.destinationWarehouseId);
-        allow create: if hasPermission(vendorId, 'purchase_order.create')
-          && tenantRecord(vendorId, request.resource.data)
-          && canAccessWarehouse(vendorId, request.resource.data.destinationWarehouseId);
-        allow update: if hasPermission(vendorId, 'purchase_order.approve')
-          && tenantRecord(vendorId, request.resource.data)
-          && canAccessWarehouse(vendorId, request.resource.data.destinationWarehouseId);
-        allow delete: if false;
+        // Draft creation and every authoritative lifecycle mutation are
+        // performed by authenticated callable commands using the Admin SDK.
+        allow create, update, delete: if false;
+      }
+
+      match /purchase_order_commands/{commandId} {
+        allow read, write: if false;
       }
 
       match /supplier_receipts/{receiptId} {
         allow read: if tenantRecord(vendorId, resource.data)
           && canAccessWarehouse(vendorId, resource.data.warehouseId);
-        allow create: if hasPermission(vendorId, 'receiving.create')
-          && tenantRecord(vendorId, request.resource.data)
-          && canAccessWarehouse(vendorId, request.resource.data.warehouseId);
-        allow update: if hasPermission(vendorId, 'receiving.approve')
-          && tenantRecord(vendorId, request.resource.data)
-          && canAccessWarehouse(vendorId, request.resource.data.warehouseId);
-        allow delete: if false;
+        allow create, update, delete: if false;
       }
 
       match /transfers/{transferId} {
@@ -307,9 +301,13 @@ service cloud.firestore {
         allow read: if approvalLocationAllowed(vendorId, resource.data);
         allow create: if hasPermission(vendorId, 'approval.create')
           && immutableTenantRecord(vendorId, request.resource.data)
+          && request.resource.data.entityType != 'PURCHASE_ORDER'
+          && request.resource.data.entityType != 'PURCHASE_ORDER_CANCELLATION'
           && approvalLocationAllowed(vendorId, request.resource.data);
         allow update: if hasPermission(vendorId, 'approval.decide')
           && immutableTenantRecord(vendorId, request.resource.data)
+          && resource.data.entityType != 'PURCHASE_ORDER'
+          && resource.data.entityType != 'PURCHASE_ORDER_CANCELLATION'
           && approvalLocationAllowed(vendorId, request.resource.data);
         allow delete: if false;
       }
@@ -362,10 +360,7 @@ service cloud.firestore {
       match /bi_events/{eventId} {
         allow read: if hasPermission(vendorId, 'bi.view')
           && eventLocationAllowed(vendorId, resource.data);
-        allow create: if hasPermission(vendorId, 'bi.event.create')
-          && immutableTenantRecord(vendorId, request.resource.data)
-          && eventLocationAllowed(vendorId, request.resource.data);
-        allow update, delete: if false;
+        allow create, update, delete: if false;
       }
 
       match /approval_events/{eventId} {
@@ -380,10 +375,7 @@ service cloud.firestore {
       match /audit_events/{eventId} {
         allow read: if hasPermission(vendorId, 'audit.view')
           && eventLocationAllowed(vendorId, resource.data);
-        allow create: if hasPermission(vendorId, 'audit.event.create')
-          && immutableTenantRecord(vendorId, request.resource.data)
-          && eventLocationAllowed(vendorId, request.resource.data);
-        allow update, delete: if false;
+        allow create, update, delete: if false;
       }
 
       match /settings/{settingId} {
