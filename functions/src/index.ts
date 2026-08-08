@@ -4,6 +4,8 @@ import { HttpsError, onCall } from 'firebase-functions/v2/https';
 import { applyDiscrepancy, applyReceipt, outstandingQuantity, TransferDiscrepancyType, transferReconciles } from './transferAccounting.js';
 import { createPurchaseOrderCallables } from './purchaseOrderCommands.js';
 import { createSupplierReceiptCallables } from './supplierReceiptCommands.js';
+import { createStocktakeCallables } from './stocktakeCommands.js';
+import { createStocktakeReversalCallable } from './stocktakeReversalCommands.js';
 
 initializeApp();
 const firestore = getFirestore();
@@ -13,6 +15,8 @@ export const {
   cancelPurchaseOrder, issuePurchaseOrder, closePurchaseOrder, recordPurchaseOrderReceipt,
 } = createPurchaseOrderCallables(firestore);
 export const { postSupplierReceipt, reverseSupplierReceipt } = createSupplierReceiptCallables(firestore);
+export const { createStocktake, openStocktake, submitStocktakeCount, submitStocktake, approveStocktake, rejectStocktake, postStocktakeAdjustment, closeStocktake, cancelStocktake } = createStocktakeCallables(firestore);
+export const reverseStocktakeAdjustment = createStocktakeReversalCallable(firestore);
 
 type Data = Record<string, unknown>;
 type Membership = { status: string; roleId: string; permissions: string[]; assignedWarehouseIds: string[]; assignedBranchIds: string[] };

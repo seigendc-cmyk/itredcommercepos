@@ -289,3 +289,17 @@ Required reports include:
 - Approved adjustment posts exactly once.
 - Rejected variance creates no stock movement.
 - Audit, BI and notification records are generated.
+
+## 17. Authoritative persistence contract
+
+Stocktake lifecycle, count evidence, approval and adjustment posting are server-owned Firebase callable commands. Browser writes to stocktakes, evidence, commands, balances, movements and trusted events are denied.
+
+Each count submission creates immutable evidence. Recounts create a new globally unique evidence record and revision; prior evidence is never overwritten. The server snapshots canonical on-hand quantity and balance version and calculates `varianceQuantity = countedQuantity - systemQuantitySnapshot`. Blind counters receive no snapshot or variance in the command response.
+
+Posting fails closed if the canonical balance quantity or version differs from the evidence snapshot. This implements the approved movement-tracking policy: intervening movements require reconciliation or recount. Zero variance creates no movement. Non-zero approved variance posts through `InventoryPostingEngine` as a directional `STOCKTAKE_ADJUSTMENT` and cannot produce invalid inventory.
+
+## 18. Compensating reversal
+
+Posted stocktake adjustments are corrected only by the trusted `reverseStocktakeAdjustment` command. Original count evidence, approval, variance and movements remain immutable. Each reversal requires a reason and posts a new opposite-direction `STOCKTAKE_ADJUSTMENT` through `InventoryPostingEngine`, linked by `reversalOfMovementId`.
+
+The server tracks cumulative reversed and remaining quantities per original movement. A command may reverse all remaining quantities or explicit partial quantities, but cannot exceed remaining authority. Partial correction sets `PARTIALLY_REVERSED`; exhausting every original movement sets `REVERSED`. Stable command receipts make replay idempotent, and each successful command emits immutable audit and BI events atomically with movements, balances and stocktake metadata.

@@ -109,6 +109,8 @@ REVERSED
 
 ## Stocktake
 
+The persisted command-state aliases are `DRAFT`, `OPEN`, `COUNTING`, `SUBMITTED`, `PENDING_APPROVAL`, `APPROVED`, `POSTING`, `POSTED`, `PARTIALLY_REVERSED`, `REVERSED`, `CLOSED`, with `REJECTED`, `CANCELLED`, and `FAILED` exceptions. They map to the detailed planning, assignment and recount states below; count revisions preserve recount history rather than mutating evidence.
+
 ```text
 PLANNED
 â†’ ASSIGNED
@@ -141,6 +143,16 @@ REJECTED
 DISPUTED
 FAILED
 ```
+
+Posted adjustment reversal:
+
+```text
+POSTED
+â†’ PARTIALLY_REVERSED
+â†’ REVERSED
+```
+
+`POSTED â†’ REVERSED` is permitted when one command consumes all remaining adjustment quantities. Reversal never rewrites original posting or count evidence.
 
 ## Shift
 

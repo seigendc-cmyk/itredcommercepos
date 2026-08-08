@@ -291,10 +291,17 @@ service cloud.firestore {
       match /stocktakes/{stocktakeId} {
         allow read: if tenantRecord(vendorId, resource.data)
           && canAccessStockLocation(vendorId, resource.data.stockLocationId);
-        allow create, update: if hasAnyPermission(vendorId, ['stocktake.count', 'stocktake.approve'])
-          && tenantRecord(vendorId, request.resource.data)
-          && canAccessStockLocation(vendorId, request.resource.data.stockLocationId);
-        allow delete: if false;
+        allow create, update, delete: if false;
+      }
+
+      match /stocktake_count_evidence/{evidenceId} {
+        allow read: if immutableTenantRecord(vendorId, resource.data)
+          && canAccessStockLocation(vendorId, resource.data.locationId);
+        allow create, update, delete: if false;
+      }
+
+      match /stocktake_commands/{commandId} {
+        allow read, write: if false;
       }
 
       match /approval_requests/{approvalId} {
