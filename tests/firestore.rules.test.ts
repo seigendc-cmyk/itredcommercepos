@@ -248,3 +248,20 @@ test('forged vendor and location identifiers are rejected', async () => {
     branchId: 'branch-b1', totalAmount: 10,
   }));
 });
+
+test('browser cannot forge stocktake lifecycle, evidence, posting, reversal, or trusted events', async () => {
+  await environment.withSecurityRulesDisabled(async context => {
+    const db = context.firestore();
+    await setDoc(doc(db, 'vendors', VENDOR_A, 'stocktakes', 'stocktake-a'), { id: 'stocktake-a', stocktakeId: 'stocktake-a', tenantId: VENDOR_A, vendorId: VENDOR_A, locationId: WAREHOUSE_A, stockLocationId: WAREHOUSE_A, locationType: 'WAREHOUSE', status: 'POSTED', approvedVariance: 2 });
+    await setDoc(doc(db, 'vendors', VENDOR_A, 'stocktake_count_evidence', 'evidence-a'), { id: 'evidence-a', tenantId: VENDOR_A, vendorId: VENDOR_A, locationId: WAREHOUSE_A, stocktakeId: 'stocktake-a', countedQuantity: 12, varianceQuantity: 2 });
+  });
+  const db = environment.authenticatedContext('owner-a').firestore();
+  await assertSucceeds(getDoc(doc(db, 'vendors', VENDOR_A, 'stocktakes', 'stocktake-a')));
+  await assertFails(setDoc(doc(db, 'vendors', VENDOR_A, 'stocktake_commands', 'forged'), { action: 'POST' }));
+  await assertFails(updateDoc(doc(db, 'vendors', VENDOR_A, 'stocktakes', 'stocktake-a'), { status: 'REVERSED', approvedVariance: 0 }));
+  await assertFails(updateDoc(doc(db, 'vendors', VENDOR_A, 'stocktake_count_evidence', 'evidence-a'), { countedQuantity: 1, varianceQuantity: -9 }));
+  await assertFails(setDoc(doc(db, 'vendors', VENDOR_A, 'inventory_movements', 'forged-stocktake'), { tenantId: VENDOR_A, vendorId: VENDOR_A, locationId: WAREHOUSE_A, movementType: 'STOCKTAKE_ADJUSTMENT' }));
+  await assertFails(setDoc(doc(db, 'vendors', VENDOR_A, 'inventory_balances', 'forged-balance'), { tenantId: VENDOR_A, vendorId: VENDOR_A, stockLocationId: WAREHOUSE_A, onHandQty: 999 }));
+  await assertFails(setDoc(doc(db, 'vendors', VENDOR_A, 'audit_events', 'forged-reversal'), { tenantId: VENDOR_A, vendorId: VENDOR_A, locationId: WAREHOUSE_A, eventType: 'STOCKTAKE_REVERSED' }));
+  await assertFails(setDoc(doc(db, 'vendors', VENDOR_A, 'bi_events', 'forged-completion'), { tenantId: VENDOR_A, vendorId: VENDOR_A, locationId: WAREHOUSE_A, eventType: 'STOCKTAKE_ADJUSTMENT_POSTED' }));
+});

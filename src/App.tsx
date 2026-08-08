@@ -71,6 +71,12 @@ import { logBIEvent, fetchBILogs } from './bi/tracker';
 import { processBIAnalytics } from './bi/analyticsEngine';
 import { BIEvent, BIEventType } from './bi/types';
 import { TransferSlipAction, TransferSlipFormat } from './services/transferSlip';
+import {
+  createStocktakeCommand,
+  openStocktakeCommand,
+  recordStocktakeCountCommand,
+  submitStocktakeCommand,
+} from './services/trustedStocktakeCommands';
 
 // UI Components
 import { AuthView } from './components/AuthView';
@@ -473,6 +479,8 @@ export default function App() {
         productId: string;
         productName: string;
         quantityDelta: number;
+        systemQty?: number;
+        countedQty?: number;
         costPrice?: number;
         reason?: string;
       }[];
@@ -481,9 +489,35 @@ export default function App() {
   }) => {
     if (!vendor || !activeStaff) return;
     assertStocktakePermission(activeStaff.role, 'stocktake.submit');
+    const stocktakeId = `stocktake_${payload.idempotencyKey.replace(/[^a-z0-9_-]+/gi, '_')}`;
+    await createStocktakeCommand({
+      vendorId: vendor.id,
+      stocktakeId,
+      locationId: payload.dataPayload.locationId,
+      locationType: payload.dataPayload.locationType.toUpperCase() as 'WAREHOUSE' | 'BRANCH',
+      type: 'CYCLE_COUNT',
+      blindCount: true,
+      commandId: `create:${stocktakeId}`,
+    });
+    await openStocktakeCommand(vendor.id, stocktakeId, `open:${stocktakeId}`);
+    for (const item of payload.dataPayload.items) {
+      const countedQuantity = Number(item.countedQty ?? Number(item.systemQty || 0) + item.quantityDelta);
+      await recordStocktakeCountCommand({
+        vendorId: vendor.id,
+        stocktakeId,
+        productId: item.productId,
+        countedQuantity,
+        countEventId: `${stocktakeId}:${item.productId}`,
+        commandId: `count:${stocktakeId}:${item.productId}`,
+        occurredAt: new Date().toISOString(),
+        offlineEvent: false,
+        reasonCode: item.reason,
+      });
+    }
+    await submitStocktakeCommand(vendor.id, stocktakeId, `submit:${stocktakeId}`);
     await createApprovalRequest(vendor.id, {
       entityType: 'STOCKTAKE_ADJUSTMENT',
-      entityId: `stocktake_${payload.idempotencyKey.replace(/[^a-z0-9_-]+/gi, '_')}`,
+      entityId: stocktakeId,
       idempotencyKey: payload.idempotencyKey,
       title: payload.title,
       description: payload.description,
@@ -492,7 +526,7 @@ export default function App() {
       branchName: payload.dataPayload.locationType === 'branch' ? payload.dataPayload.locationName : undefined,
       warehouseId: payload.dataPayload.locationType === 'warehouse' ? payload.dataPayload.locationId : undefined,
       warehouseName: payload.dataPayload.locationType === 'warehouse' ? payload.dataPayload.locationName : undefined,
-      dataPayload: payload.dataPayload,
+      dataPayload: { ...payload.dataPayload, stocktakeId, authoritativePersistence: 'FIREBASE_CALLABLE' },
     });
     await refreshAllData();
   };

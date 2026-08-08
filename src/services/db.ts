@@ -2256,6 +2256,32 @@ export async function reviewApprovalRequest(
   const initialSnapshot = await getDoc(requestRef);
   if (!initialSnapshot.exists()) throw new Error('Approval request not found.');
   const initial = normalizeStoredApproval(vendorId, initialSnapshot.id, initialSnapshot.data());
+  if (initial.entityType === 'STOCKTAKE_ADJUSTMENT') {
+    const stocktakeId = String(initial.dataPayload.stocktakeId || initial.entityId);
+    if (decision === 'APPROVED') {
+      await httpsCallable<Record<string, unknown>, unknown>(functions, 'approveStocktake')({ vendorId, stocktakeId, commandId: `approve:${requestId}` });
+      await httpsCallable<Record<string, unknown>, unknown>(functions, 'postStocktakeAdjustment')({ vendorId, stocktakeId, commandId: `post:${requestId}` });
+    } else if (decision === 'REJECTED') {
+      await httpsCallable<Record<string, unknown>, unknown>(functions, 'rejectStocktake')({ vendorId, stocktakeId, commandId: `reject:${requestId}`, reason: reason || 'Rejected by authorised reviewer' });
+    } else {
+      await httpsCallable<Record<string, unknown>, unknown>(functions, 'cancelStocktake')({ vendorId, stocktakeId, commandId: `cancel:${requestId}`, reason: reason || 'Cancelled by authorised reviewer' });
+    }
+    const projected = {
+      ...initial,
+      status: decision === 'APPROVED' ? 'COMPLETED' : decision,
+      version: initial.version + 1,
+      approver: reviewer,
+      reviewedBy: reviewer.id,
+      reviewedByName: reviewer.name,
+      reviewedAt: now,
+      decisionAt: now,
+      outcome: decision === 'APPROVED' ? 'COMPLETED' : decision,
+      reason: reason || `${decision.toLowerCase()} by authorised reviewer`,
+      updatedAt: now,
+    } as ApprovalRequest;
+    await setDoc(requestRef, projected);
+    return projected;
+  }
   if (initial.entityType === 'SUPPLIER_STOCK_RECEIPT' && decision === 'APPROVED') {
     const approved = await runTransaction(db, async transaction => {
       const snapshot = await transaction.get(requestRef);
@@ -2546,10 +2572,7 @@ export async function reviewApprovalRequest(
         barcodeReference: current.entityId,
         createdAt: current.requestedAt,
       });
-    } else if (
-      current.entityType === 'OPENING_BALANCE_ADJUSTMENT' ||
-      current.entityType === 'STOCKTAKE_ADJUSTMENT'
-    ) {
+    } else if (current.entityType === 'OPENING_BALANCE_ADJUSTMENT') {
       const items = requirePayloadItems(payload);
       const locationType = payload.locationType || 'branch';
       const locationId = payload.locationId;
