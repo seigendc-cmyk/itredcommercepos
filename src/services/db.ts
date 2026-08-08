@@ -13,7 +13,8 @@ import {
   writeBatch
   ,deleteDoc
 } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { httpsCallable } from 'firebase/functions';
+import { db, functions } from '../lib/firebase';
 import {
   VendorProfile,
   Warehouse,
@@ -106,7 +107,6 @@ import {
 import { assertProductPermission, determineProductRemoval, ProductUsageSummary } from './productLifecycle';
 import { assertCanonicalProductReference, assertDuplicateDecision, checkProductDuplicates, normalizeHsCode, ProductDuplicateDecisionInput, validateHsCode, assertExtendedProductPermission, effectiveProductTaxRate } from '../features/products';
 import { requiresBelowAverageCostApproval } from '../features/inventory/averageCost';
-import { postApprovedSupplierReceiptInFirestoreTransaction } from '../features/inventory/infrastructure/firestoreSupplierReceiptAdapter';
 
 // Helper for local caching/fallback to ensure snappy preview & offline resiliency
 const LOCAL_STORAGE_KEY = 'itred_pos_vendor_data_';
@@ -2253,6 +2253,48 @@ export async function reviewApprovalRequest(
 ): Promise<ApprovalRequest> {
   const now = new Date().toISOString();
   const requestRef = doc(db, 'vendors', vendorId, 'approval_requests', requestId);
+  const initialSnapshot = await getDoc(requestRef);
+  if (!initialSnapshot.exists()) throw new Error('Approval request not found.');
+  const initial = normalizeStoredApproval(vendorId, initialSnapshot.id, initialSnapshot.data());
+  if (initial.entityType === 'SUPPLIER_STOCK_RECEIPT' && decision === 'APPROVED') {
+    const approved = await runTransaction(db, async transaction => {
+      const snapshot = await transaction.get(requestRef);
+      if (!snapshot.exists()) throw new Error('Approval request not found.');
+      const current = normalizeStoredApproval(vendorId, snapshot.id, snapshot.data());
+      const decided = decideInventoryRequest(current, decision, reviewer, expectedVersion, reason || 'Approved by authorised receiving officer', now);
+      transaction.set(requestRef, decided);
+      const approvalEvent = auditEventDocument(decided, 'APPROVED', reviewer, now, decided.reason || reason);
+      transaction.set(doc(db, 'vendors', vendorId, 'approval_events', approvalEvent.id), approvalEvent);
+      return decided;
+    });
+    const payload = approved.dataPayload;
+    const receiptLines = requirePayloadItems(payload).map((item, index) => {
+      const quantity = Number(item.quantity || 0);
+      const classification = String(item.receiptClassification || 'ACCEPTED').toUpperCase();
+      const acceptedQuantity = Number(item.acceptedQuantity ?? (classification === 'ACCEPTED' ? quantity : 0));
+      const damagedQuantity = Number(item.damagedQuantity ?? (classification === 'DAMAGED' ? quantity : 0));
+      const quarantinedQuantity = Number(item.quarantinedQuantity ?? (classification === 'QUARANTINED' ? quantity : 0));
+      const rejectedQuantity = Number(item.rejectedQuantity ?? 0);
+      return {
+        lineId: String((item as unknown as Record<string, unknown>).lineId || `line_${index + 1}_${item.productId}`), productId: item.productId,
+        deliveredQuantity: Number(item.deliveredQuantity ?? acceptedQuantity + damagedQuantity + quarantinedQuantity + rejectedQuantity),
+        acceptedQuantity, damagedQuantity, quarantinedQuantity, rejectedQuantity,
+        unitCost: Number(item.unitCost || 0), unitOfMeasure: item.unitOfMeasure, batchNumber: item.batchNumber,
+      };
+    });
+    const purchaseOrderId = String(payload.purchaseOrderId || '').trim();
+    if (!purchaseOrderId) throw new Error('An issued purchase order is required for authoritative supplier receipt accounting.');
+    await httpsCallable<Record<string, unknown>, unknown>(functions, 'postSupplierReceipt')({
+      vendorId, receiptId: approved.entityId, commandId: `supplier-receipt-post:${requestId}`, approvalRequestId: requestId,
+      warehouseId: approved.warehouseId || payload.locationId, supplierId: payload.supplierId, purchaseOrderId,
+      referenceNo: payload.referenceNo || approved.entityId, lines: receiptLines,
+      ...(payload.overReceiptExceptionRequested ? { overReceiptApprovalId: requestId } : {}),
+    });
+    const completedSnapshot = await getDoc(requestRef);
+    const completed = normalizeStoredApproval(vendorId, completedSnapshot.id, completedSnapshot.data()!);
+    await logWorkflowTransitions(completed, ['APPROVED', 'PROCESSING', 'COMPLETED'], reviewer, completed.reason || reason);
+    return completed;
+  }
   let result: ApprovalRequest;
   try {
     result = await runTransaction(db, async transaction => {
@@ -2504,39 +2546,6 @@ export async function reviewApprovalRequest(
         barcodeReference: current.entityId,
         createdAt: current.requestedAt,
       });
-    } else if (current.entityType === 'SUPPLIER_STOCK_RECEIPT') {
-      const items = requirePayloadItems(payload);
-      const warehouseId = current.warehouseId || payload.locationId;
-      const posting = await postApprovedSupplierReceiptInFirestoreTransaction(transaction, {
-        tenantId: String(snapshot.data().tenantId || '').trim(),
-        vendorId,
-        receiptId: current.entityId,
-        approvalRequestId: requestId,
-        warehouseId: warehouseId || '',
-        destinationType: current.branchId || payload.locationType === 'branch' ? 'branch' : 'warehouse',
-        supplierId: payload.supplierId,
-        supplierName: payload.supplierName || '',
-        referenceNo: payload.referenceNo || current.entityId,
-        purchaseOrderId: payload.purchaseOrderId,
-        purchaseOrderNumber: payload.purchaseOrderNumber,
-        overReceiptExceptionApproved: payload.overReceiptExceptionRequested === true && Boolean(payload.overReceiptReason?.trim()) && (reviewer.role === 'sysadmin' || reviewer.role === 'manager'),
-        actor: current.requester,
-        requestedAt: current.requestedAt,
-        postedAt: now,
-        notes: payload.notes,
-        lines: items.map(item => ({
-          productId: item.productId,
-          productName: item.productName,
-          quantity: Number(item.quantity || 0),
-          unitCost: Number(item.unitCost || 0),
-          unitOfMeasure: item.unitOfMeasure,
-          batchNumber: item.batchNumber,
-          orderedQuantity: item.orderedQuantity,
-          previouslyReceivedQuantity: item.previouslyReceivedQuantity,
-          receiptClassification: item.receiptClassification,
-        })),
-      });
-      quantityDecisions.push(...posting.quantityDecisions);
     } else if (
       current.entityType === 'OPENING_BALANCE_ADJUSTMENT' ||
       current.entityType === 'STOCKTAKE_ADJUSTMENT'

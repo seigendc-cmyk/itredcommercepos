@@ -57,6 +57,7 @@ A supplier receipt must identify:
 - delivered quantity;
 - accepted quantity;
 - damaged quantity;
+- quarantined quantity;
 - rejected quantity;
 - unit cost;
 - batch, serial or expiry data where enabled;
@@ -75,6 +76,8 @@ accepted quantity
 +
 damaged quantity
 +
+quarantined quantity
++
 rejected quantity
 ```
 
@@ -83,6 +86,8 @@ Only accepted quantity becomes available warehouse stock.
 Damaged or quarantined quantities must use an explicit controlled stock condition.
 
 Rejected quantities must not become available inventory.
+
+Every line records `orderedQuantity`, `deliveredQuantity`, `acceptedQuantity`, `damagedQuantity`, `quarantinedQuantity`, `rejectedQuantity`, `previouslyReceivedQuantity`, `cumulativeReceivedQuantity`, and `outstandingQuantity`. No quantity may be silently clamped or discarded.
 
 ## 6. Purchase-order receiving
 
@@ -110,7 +115,7 @@ Where enabled by vendor policy, it must require:
 
 ## 8. Atomic posting
 
-Approval, inventory validation, stock-ledger posting, receipt completion, purchase-order update, audit event and BI event should commit atomically where supported.
+Approval validation and consumption, inventory validation, stock-ledger posting, receipt completion, purchase-order update, command idempotency record, audit event and BI event must commit in one authoritative server transaction.
 
 Duplicate idempotency keys must not create duplicate stock.
 
@@ -125,6 +130,8 @@ Correction requires a controlled reversal that:
 - preserves original history;
 - records reason and approver;
 - updates purchase-order balances correctly.
+
+Reversal uses deterministic idempotency and new `SUPPLIER_RECEIPT_REVERSAL` compensating movements for every affected stock bucket. Original receipt lines and movements remain immutable, and reversal cannot exceed the original unreversed quantity or the stock remaining in its disposition bucket.
 
 ## 10. Required events
 

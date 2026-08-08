@@ -107,7 +107,7 @@ export const ReceiveSupplierStockModal: React.FC<ReceiveSupplierStockModalProps>
     [lineItems, selectedPurchaseOrder],
   );
   const hasOverReceipt = comparisons.some(line => line.status === 'OVER_RECEIPT');
-  const grandTotal = lineItems.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
+  const grandTotal = lineItems.reduce((sum, item) => sum + (item.acceptedQuantity ?? item.quantity) * item.unitCost, 0);
 
   const addProduct = (product: Product) => {
     const poItem = selectedPurchaseOrder?.items.find(item => item.productId === product.id);
@@ -119,6 +119,11 @@ export const ReceiveSupplierStockModal: React.FC<ReceiveSupplierStockModalProps>
       productName: product.name,
       sku: product.sku,
       quantity: outstanding > 0 ? outstanding : 1,
+      deliveredQuantity: outstanding > 0 ? outstanding : 1,
+      acceptedQuantity: outstanding > 0 ? outstanding : 1,
+      damagedQuantity: 0,
+      quarantinedQuantity: 0,
+      rejectedQuantity: 0,
       unitCost: poItem?.unitCost ?? product.costPrice,
       unitOfMeasure: poItem?.unitOfMeasure || product.unit,
       batchNumber: poItem?.batchNumber,
@@ -292,7 +297,9 @@ export const ReceiveSupplierStockModal: React.FC<ReceiveSupplierStockModalProps>
               <thead className="bg-[#1F242D] text-white">
                 <tr>
                   <th className="p-3">SKU / Product</th><th className="p-3 text-right">Ordered</th>
-                  <th className="p-3 text-right">Previously received</th><th className="p-3 text-right">Receiving</th>
+                  <th className="p-3 text-right">Previously received</th><th className="p-3 text-right">Delivered</th>
+                  <th className="p-3 text-right">Accepted</th><th className="p-3 text-right">Damaged</th>
+                  <th className="p-3 text-right">Quarantine</th><th className="p-3 text-right">Rejected</th>
                   <th className="p-3 text-right">Outstanding</th><th className="p-3 text-right">Warehouse available</th>
                   <th className="p-3 text-right">Unit cost</th><th className="p-3 text-right">Variance</th>
                   <th className="p-3">Batch / unit</th><th className="p-3">Status</th><th className="p-3" />
@@ -309,9 +316,13 @@ export const ReceiveSupplierStockModal: React.FC<ReceiveSupplierStockModalProps>
                     </td>
                     <td className="p-3 text-right">{line.orderedQuantity}</td>
                     <td className="p-3 text-right">{line.previouslyReceivedQuantity}</td>
-                    <td className="p-3"><input type="number" min="1" value={line.quantity}
-                      onChange={event => updateLine(index, { quantity: Math.max(1, Number(event.target.value) || 1) })}
+                    <td className="p-3 text-right font-bold">{line.deliveredQuantity}</td>
+                    <td className="p-3"><input type="number" min="0" value={line.acceptedQuantity}
+                      onChange={event => { const acceptedQuantity = Math.max(0, Number(event.target.value) || 0); updateLine(index, { quantity: acceptedQuantity, acceptedQuantity, deliveredQuantity: acceptedQuantity + (line.damagedQuantity || 0) + (line.quarantinedQuantity || 0) + (line.rejectedQuantity || 0) }); }}
                       className="w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-right font-bold" /></td>
+                    <td className="p-3"><input type="number" min="0" value={line.damagedQuantity || 0} onChange={event => { const damagedQuantity = Math.max(0, Number(event.target.value) || 0); updateLine(index, { damagedQuantity, deliveredQuantity: (line.acceptedQuantity || 0) + damagedQuantity + (line.quarantinedQuantity || 0) + (line.rejectedQuantity || 0) }); }} className="w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-right" /></td>
+                    <td className="p-3"><input type="number" min="0" value={line.quarantinedQuantity || 0} onChange={event => { const quarantinedQuantity = Math.max(0, Number(event.target.value) || 0); updateLine(index, { quarantinedQuantity, deliveredQuantity: (line.acceptedQuantity || 0) + (line.damagedQuantity || 0) + quarantinedQuantity + (line.rejectedQuantity || 0) }); }} className="w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-right" /></td>
+                    <td className="p-3"><input type="number" min="0" value={line.rejectedQuantity || 0} onChange={event => { const rejectedQuantity = Math.max(0, Number(event.target.value) || 0); updateLine(index, { rejectedQuantity, deliveredQuantity: (line.acceptedQuantity || 0) + (line.damagedQuantity || 0) + (line.quarantinedQuantity || 0) + rejectedQuantity }); }} className="w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-right" /></td>
                     <td className="p-3 text-right">{line.outstandingAfterReceipt}</td>
                     <td className="p-3 text-right">{warehouseStock[line.productId] || 0}</td>
                     <td className="p-3"><input type="number" min="0" step="0.01" value={line.unitCost}
@@ -333,7 +344,7 @@ export const ReceiveSupplierStockModal: React.FC<ReceiveSupplierStockModalProps>
                       aria-label={`Remove ${line.productName}`} className="text-slate-400 hover:text-red-600"><Trash2 className="h-4 w-4" /></button></td>
                   </tr>
                 ))}
-                {comparisons.length === 0 && <tr><td colSpan={11} className="p-8 text-center text-slate-500">Search and add products to receive.</td></tr>}
+                {comparisons.length === 0 && <tr><td colSpan={15} className="p-8 text-center text-slate-500">Search and add products to receive.</td></tr>}
               </tbody>
             </table>
           </div>

@@ -1,11 +1,11 @@
 {
   "name": "itred-pos-functions",
   "private": true,
-  "main": "lib/index.js",
+  "main": "lib/functions/src/index.js",
   "engines": { "node": "20" },
   "scripts": {
     "build": "tsc",
-    "test": "tsx --test src/transferCommands.test.ts"
+    "test": "tsx --test src/*.test.ts"
   },
   "dependencies": {
     "firebase-admin": "^13.4.0",

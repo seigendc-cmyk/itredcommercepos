@@ -2,9 +2,17 @@ import { initializeApp } from 'firebase-admin/app';
 import { FieldValue, getFirestore, Transaction } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
 import { applyDiscrepancy, applyReceipt, outstandingQuantity, TransferDiscrepancyType, transferReconciles } from './transferAccounting.js';
+import { createPurchaseOrderCallables } from './purchaseOrderCommands.js';
+import { createSupplierReceiptCallables } from './supplierReceiptCommands.js';
 
 initializeApp();
 const firestore = getFirestore();
+
+export const {
+  createPurchaseOrder, amendPurchaseOrder, submitPurchaseOrder, approvePurchaseOrder, rejectPurchaseOrder,
+  cancelPurchaseOrder, issuePurchaseOrder, closePurchaseOrder, recordPurchaseOrderReceipt,
+} = createPurchaseOrderCallables(firestore);
+export const { postSupplierReceipt, reverseSupplierReceipt } = createSupplierReceiptCallables(firestore);
 
 type Data = Record<string, unknown>;
 type Membership = { status: string; roleId: string; permissions: string[]; assignedWarehouseIds: string[]; assignedBranchIds: string[] };

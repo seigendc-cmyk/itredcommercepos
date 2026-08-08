@@ -3,6 +3,7 @@ import test from 'node:test';
 import { Product, PurchaseOrder, Supplier } from '../types';
 import {
   assertReceiptAllowed,
+  canonicalReceiptQuantities,
   compareReceiptToPurchaseOrder,
   filterOpenPurchaseOrders,
   filterSuppliers,
@@ -72,6 +73,13 @@ test('filters suppliers and only returns their open or partially received orders
     ], 'sup-1').map(order => order.id),
     ['po-1', 'po-2'],
   );
+});
+
+test('delivered quantity must reconcile to every disposition', () => {
+  assert.deepEqual(canonicalReceiptQuantities({ ...line, quantity: 5, deliveredQuantity: 10, acceptedQuantity: 5, damagedQuantity: 2, quarantinedQuantity: 1, rejectedQuantity: 2 }), {
+    deliveredQuantity: 10, acceptedQuantity: 5, damagedQuantity: 2, quarantinedQuantity: 1, rejectedQuantity: 2,
+  });
+  assert.throws(() => canonicalReceiptQuantities({ ...line, deliveredQuantity: 10, acceptedQuantity: 5, damagedQuantity: 1, quarantinedQuantity: 1, rejectedQuantity: 1 }), (error: unknown) => error instanceof SupplierReceivingError && error.code === 'invalid_quantity');
 });
 
 test('searches products by SKU, partial name, brand, manufacturer code and barcode', () => {
