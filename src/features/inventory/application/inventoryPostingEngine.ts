@@ -41,12 +41,20 @@ export class InventoryPostingEngine {
       if (destinationBalance && command.expectedDestinationVersion !== undefined && destinationBalance.version !== command.expectedDestinationVersion) {
         throw new InventoryDomainError('STALE_BALANCE', 'Destination inventory changed after the command was prepared.');
       }
-      if (sourceBalance && sourceBalance.onHandQty < command.quantity) throw new InventoryDomainError('INSUFFICIENT_STOCK', 'Source location has insufficient stock.');
+      const sourceBucket = command.movementType === 'SUPPLIER_RECEIPT_REVERSAL' ? (command.quantityBucket ?? 'ON_HAND') : 'ON_HAND';
+      if (sourceBalance && this.bucketQuantity(sourceBalance, sourceBucket) < command.quantity) throw new InventoryDomainError('INSUFFICIENT_STOCK', 'Source location has insufficient stock in the affected quantity bucket.');
       if (command.movementType === 'TRANSFER_RECEIPT' && destinationBalance && destinationBalance.inTransitQty < command.quantity) {
         throw new InventoryDomainError('INSUFFICIENT_STOCK', 'Destination location has insufficient in-transit stock.');
       }
 
-      const updatedSource = sourceBalance ? validateInventoryBalance({ ...sourceBalance, onHandQty: sourceBalance.onHandQty - command.quantity, version: sourceBalance.version + 1, updatedAt: recordedAt }) : undefined;
+      const updatedSource = sourceBalance ? validateInventoryBalance({
+        ...sourceBalance,
+        ...(sourceBucket === 'QUARANTINED' ? { quarantinedQty: sourceBalance.quarantinedQty - command.quantity }
+          : sourceBucket === 'DAMAGED' ? { damagedQty: sourceBalance.damagedQty - command.quantity }
+            : { onHandQty: sourceBalance.onHandQty - command.quantity }),
+        version: sourceBalance.version + 1,
+        updatedAt: recordedAt,
+      }) : undefined;
       let updatedDestination: InventoryBalance | undefined;
       const destinationBucket = command.quantityBucket ?? 'ON_HAND';
       if (command.movementType === 'TRANSFER_DISPATCH' && destinationBalance) {
@@ -66,14 +74,14 @@ export class InventoryPostingEngine {
         });
       }
       const primaryLocation = updatedSource ? source! : destination!;
-      const beforeQuantity = updatedSource ? sourceBalance!.onHandQty : this.bucketQuantity(destinationBalance!, destinationBucket);
-      const afterQuantity = updatedSource ? updatedSource.onHandQty : this.bucketQuantity(updatedDestination!, destinationBucket);
+      const beforeQuantity = updatedSource ? this.bucketQuantity(sourceBalance!, sourceBucket) : this.bucketQuantity(destinationBalance!, destinationBucket);
+      const afterQuantity = updatedSource ? this.bucketQuantity(updatedSource, sourceBucket) : this.bucketQuantity(updatedDestination!, destinationBucket);
       const quantityDelta = afterQuantity - beforeQuantity;
       const movement = immutableInventoryMovement({
         id: command.commandId, idempotencyKey: command.idempotencyKey, tenantId: command.tenantId, vendorId: command.vendorId,
         productId: command.productId, sourceLocationId: command.sourceLocationId, destinationLocationId: command.destinationLocationId,
-        movementType: command.movementType, quantity: command.quantity, quantityBucket: command.quantityBucket, sourceBeforeQty: sourceBalance?.onHandQty,
-        sourceAfterQty: updatedSource?.onHandQty, destinationBeforeQty: destinationBalance ? this.bucketQuantity(destinationBalance, destinationBucket) : undefined,
+        movementType: command.movementType, quantity: command.quantity, quantityBucket: command.quantityBucket, sourceBeforeQty: sourceBalance ? this.bucketQuantity(sourceBalance, sourceBucket) : undefined,
+        sourceAfterQty: updatedSource ? this.bucketQuantity(updatedSource, sourceBucket) : undefined, destinationBeforeQty: destinationBalance ? this.bucketQuantity(destinationBalance, destinationBucket) : undefined,
         destinationAfterQty: updatedDestination ? this.bucketQuantity(updatedDestination, destinationBucket) : undefined, referenceType: command.referenceType, referenceId: command.referenceId,
         actorId: command.actorId, approvalRequestId: command.approvalRequestId,
         locationId: primaryLocation.id, locationType: primaryLocation.type, quantityDelta, beforeQuantity, afterQuantity,

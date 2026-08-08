@@ -334,6 +334,13 @@ export interface SupplierReceipt {
     currentReceiptQuantity?: number;
     remainingQuantity?: number;
     variance?: number;
+    deliveredQuantity?: number;
+    acceptedQuantity?: number;
+    damagedQuantity?: number;
+    quarantinedQuantity?: number;
+    rejectedQuantity?: number;
+    cumulativeReceivedQuantity?: number;
+    outstandingQuantity?: number;
     receiptClassification?: 'ACCEPTED' | 'QUARANTINED' | 'DAMAGED';
     unitOfMeasure?: string;
     batchNumber?: string;
@@ -638,6 +645,11 @@ export interface ApprovalInventoryItem {
   sku?: string;
   quantity?: number;
   quantityReceived?: number;
+  deliveredQuantity?: number;
+  acceptedQuantity?: number;
+  damagedQuantity?: number;
+  quarantinedQuantity?: number;
+  rejectedQuantity?: number;
   unitOfMeasure?: string;
   batchNumber?: string;
   serialNumber?: string;

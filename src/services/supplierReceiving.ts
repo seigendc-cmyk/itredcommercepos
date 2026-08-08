@@ -11,11 +11,32 @@ export interface ReceiptDraftLine {
   productName: string;
   sku: string;
   quantity: number;
+  deliveredQuantity?: number;
+  acceptedQuantity?: number;
+  damagedQuantity?: number;
+  quarantinedQuantity?: number;
+  rejectedQuantity?: number;
   unitCost: number;
   unitOfMeasure: string;
   batchNumber?: string;
   orderedQuantity: number;
   previouslyReceivedQuantity: number;
+}
+
+export interface CanonicalReceiptQuantities {
+  deliveredQuantity: number; acceptedQuantity: number; damagedQuantity: number; quarantinedQuantity: number; rejectedQuantity: number;
+}
+
+export function canonicalReceiptQuantities(line: ReceiptDraftLine): CanonicalReceiptQuantities {
+  const acceptedQuantity = Number(line.acceptedQuantity ?? line.quantity ?? 0);
+  const damagedQuantity = Number(line.damagedQuantity ?? 0);
+  const quarantinedQuantity = Number(line.quarantinedQuantity ?? 0);
+  const rejectedQuantity = Number(line.rejectedQuantity ?? 0);
+  const deliveredQuantity = Number(line.deliveredQuantity ?? acceptedQuantity + damagedQuantity + quarantinedQuantity + rejectedQuantity);
+  const quantities = { deliveredQuantity, acceptedQuantity, damagedQuantity, quarantinedQuantity, rejectedQuantity };
+  if (Object.values(quantities).some(quantity => !Number.isFinite(quantity) || quantity < 0) || deliveredQuantity <= 0) throw new SupplierReceivingError('invalid_quantity', 'Receipt quantities must be finite, non-negative, and delivered quantity must be positive.');
+  if (Math.abs(deliveredQuantity - acceptedQuantity - damagedQuantity - quarantinedQuantity - rejectedQuantity) > 1e-9) throw new SupplierReceivingError('invalid_quantity', 'Delivered quantity must equal accepted, damaged, quarantined, and rejected quantities.');
+  return quantities;
 }
 
 export interface PurchaseOrderComparison extends ReceiptDraftLine {
@@ -82,9 +103,7 @@ export function mergeReceiptLine(
   lines: ReceiptDraftLine[],
   incoming: ReceiptDraftLine,
 ): ReceiptDraftLine[] {
-  if (incoming.quantity <= 0) {
-    throw new SupplierReceivingError('invalid_quantity', 'Receipt quantity must be greater than zero.');
-  }
+  const incomingQuantities = canonicalReceiptQuantities(incoming);
   const existingIndex = lines.findIndex(line => lineKey(line) === lineKey(incoming));
   if (existingIndex < 0) return [...lines, incoming];
 
@@ -97,7 +116,14 @@ export function mergeReceiptLine(
   }
   return lines.map((line, index) =>
     index === existingIndex
-      ? { ...line, quantity: line.quantity + incoming.quantity }
+      ? (() => {
+          const existing = canonicalReceiptQuantities(line);
+          const acceptedQuantity = existing.acceptedQuantity + incomingQuantities.acceptedQuantity;
+          const damagedQuantity = existing.damagedQuantity + incomingQuantities.damagedQuantity;
+          const quarantinedQuantity = existing.quarantinedQuantity + incomingQuantities.quarantinedQuantity;
+          const rejectedQuantity = existing.rejectedQuantity + incomingQuantities.rejectedQuantity;
+          return { ...line, quantity: acceptedQuantity, acceptedQuantity, damagedQuantity, quarantinedQuantity, rejectedQuantity, deliveredQuantity: acceptedQuantity + damagedQuantity + quarantinedQuantity + rejectedQuantity };
+        })()
       : line,
   );
 }
@@ -110,14 +136,15 @@ export function compareReceiptToPurchaseOrder(
     (purchaseOrder?.items || []).map(item => [item.productId, item]),
   );
   return lines.map(line => {
+    const quantities = canonicalReceiptQuantities(line);
     const ordered = poItems.get(line.productId);
     const orderedQuantity = ordered?.orderedQuantity ?? line.orderedQuantity;
     const previouslyReceivedQuantity =
       ordered?.receivedQuantity ?? line.previouslyReceivedQuantity;
     const outstandingBeforeReceipt = Math.max(0, orderedQuantity - previouslyReceivedQuantity);
     const outstandingAfterReceipt =
-      Math.max(0, outstandingBeforeReceipt - line.quantity);
-    const variance = line.quantity - outstandingBeforeReceipt;
+      Math.max(0, outstandingBeforeReceipt - quantities.deliveredQuantity);
+    const variance = quantities.deliveredQuantity - outstandingBeforeReceipt;
     const status = !purchaseOrder
       ? 'FREE_ORDER'
       : variance > 0
@@ -127,6 +154,8 @@ export function compareReceiptToPurchaseOrder(
           : 'MATCHED';
     return {
       ...line,
+      ...quantities,
+      quantity: quantities.acceptedQuantity,
       orderedQuantity,
       previouslyReceivedQuantity,
       outstandingBeforeReceipt,

@@ -145,7 +145,7 @@ const TRANSITIONS: Readonly<Record<PurchaseOrderStatus, readonly PurchaseOrderSt
   REJECTED: [],
   CANCELLED: [],
   ISSUED: ['PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED'],
-  PARTIALLY_RECEIVED: ['RECEIVED', 'CANCELLED'],
+  PARTIALLY_RECEIVED: ['PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED'],
   RECEIVED: ['CLOSED'],
   CLOSED: [],
   FAILED: [],
@@ -346,6 +346,44 @@ export function applyPurchaseOrderReceipt(
   const fullyReceived = lines.every(line => line.outstandingQuantity === 0);
   const next = transitionPurchaseOrder(order, fullyReceived ? 'RECEIVED' : 'PARTIALLY_RECEIVED', actorId, commandId, now);
   return { ...next, lines, items: lines, ...(fullyReceived ? { receivedAt: now } : {}) };
+}
+
+export function reversePurchaseOrderReceipt(
+  order: PurchaseOrderDocument,
+  receipts: Array<{ lineId?: string; productId?: string; quantity: number }>,
+  actorId: string,
+  commandId: string,
+  now: string,
+  reason: string,
+): PurchaseOrderDocument {
+  if (!['PARTIALLY_RECEIVED', 'RECEIVED'].includes(order.status)) throw new PurchaseOrderError('invalid_transition', 'Only received purchase-order quantities can be reversed.');
+  if (!reason.trim()) throw new PurchaseOrderError('reason_required', 'A reversal reason is required.');
+  const quantities = new Map<string, number>();
+  for (const receipt of receipts) {
+    const line = order.lines.find(candidate => (receipt.lineId && candidate.lineId === receipt.lineId) || (receipt.productId && candidate.productId === receipt.productId));
+    const quantity = finite(receipt.quantity, 'reversal quantity');
+    if (!line || quantity <= 0) throw new PurchaseOrderError('invalid_product', 'The reversal references an invalid purchase-order line.');
+    quantities.set(line.lineId, (quantities.get(line.lineId) || 0) + quantity);
+  }
+  const lines = order.lines.map(line => {
+    const quantity = quantities.get(line.lineId) || 0;
+    if (quantity > line.receivedQuantity) throw new PurchaseOrderError('over_receipt', `Reversal exceeds received quantity for ${line.description}.`);
+    const receivedQuantity = line.receivedQuantity - quantity;
+    return { ...line, receivedQuantity, outstandingQuantity: Math.max(0, line.orderedQuantity - receivedQuantity) };
+  });
+  const anyReceived = lines.some(line => line.receivedQuantity > 0);
+  const fullyReceived = lines.every(line => line.outstandingQuantity === 0);
+  const status: PurchaseOrderStatus = fullyReceived ? 'RECEIVED' : anyReceived ? 'PARTIALLY_RECEIVED' : 'ISSUED';
+  return {
+    ...order,
+    status,
+    lines,
+    items: lines,
+    version: order.version + 1,
+    updatedAt: now,
+    ...(status === 'RECEIVED' ? {} : { receivedAt: undefined }),
+    statusHistory: [...order.statusHistory, { from: order.status, to: status, actorId, commandId, occurredAt: now, reason: reason.trim() }],
+  };
 }
 
 export function cancelPurchaseOrderDocument(order: PurchaseOrderDocument, actorId: string, commandId: string, reason: string, now: string): PurchaseOrderDocument {

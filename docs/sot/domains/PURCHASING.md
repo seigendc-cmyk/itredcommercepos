@@ -40,7 +40,7 @@ Allowed transitions are explicit:
 | `PENDING_APPROVAL` | `APPROVED`, `REJECTED`, `CANCELLED` |
 | `APPROVED` | `ISSUED`, `CANCELLED` |
 | `ISSUED` | `PARTIALLY_RECEIVED`, `RECEIVED`, `CANCELLED` |
-| `PARTIALLY_RECEIVED` | `RECEIVED`, `CANCELLED` |
+| `PARTIALLY_RECEIVED` | `PARTIALLY_RECEIVED`, `RECEIVED`, `CANCELLED` |
 | `RECEIVED` | `CLOSED` |
 | `REJECTED`, `CANCELLED`, `CLOSED`, `FAILED` | none |
 
@@ -100,9 +100,9 @@ An approved or issued PO requiring a commercial change must be cancelled with a 
 
 Supplier receiving consumes server-owned PO lines and balances. A receipt must match the PO supplier and destination warehouse and may apply only to `ISSUED` or `PARTIALLY_RECEIVED` orders.
 
-The server uses ordered, previously received, and outstanding quantities. Over-receipt requires a current approved `ALLOW_OVER_RECEIPT` approval record for that PO; a browser boolean is never authority. Partial accounting transitions to `PARTIALLY_RECEIVED`; all accounted lines transition to `RECEIVED`. Closure is a separate controlled `RECEIVED -> CLOSED` command.
+The server uses ordered, previously received, and outstanding quantities. Over-receipt requires a current approved `ALLOW_OVER_RECEIPT` record for that PO or an explicitly approved over-receipt exception bundled with the receipt approval; a browser boolean is never authority. Additional partial accounting remains `PARTIALLY_RECEIVED`; all accounted lines transition to `RECEIVED`. Closure is a separate controlled `RECEIVED -> CLOSED` command.
 
-Supplier receipt inventory posting remains governed by the canonical Inventory Posting Engine and the trusted receiving/reversal boundary. PO approval and issue never call the inventory engine.
+Supplier receipt inventory posting remains governed by the canonical Inventory Posting Engine and the trusted receiving/reversal boundary. Receipt posting and PO received/outstanding accounting commit in the same server transaction. PO approval and issue never call the inventory engine.
 
 ## 10. Cancellation and closure
 
