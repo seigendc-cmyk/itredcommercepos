@@ -17,6 +17,8 @@
         "test:integration:receiving": "npm --prefix functions run build && firebase emulators:exec --only auth,functions,firestore --project demo-itred-pos-rules-test \"npm run test:integration:receiving:run\"",
         "test:integration:stocktake:run": "tsx --test --test-concurrency=1 tests/stocktake.callable.test.ts",
         "test:integration:stocktake": "npm --prefix functions run build && firebase emulators:exec --only auth,functions,firestore --project demo-itred-stocktake-test \"npm run test:integration:stocktake:run\"",
+        "test:integration:sales:run": "tsx --test --test-concurrency=1 tests/sales.callable.test.ts",
+        "test:integration:sales": "npm --prefix functions run build && firebase emulators:exec --only auth,functions,firestore --project demo-itred-sales-test \"npm run test:integration:sales:run\"",
         "audit:inventory": "powershell -ExecutionPolicy Bypass -File scripts/audit-inventory-writes.ps1",
         "test:e2e": "playwright test"
     },
