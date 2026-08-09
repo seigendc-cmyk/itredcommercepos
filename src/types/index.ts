@@ -477,6 +477,7 @@ export interface TerminalShift {
   terminalId: string;
   terminalName?: string;
   staffId: string;
+  userUid?: string;
   staffName: string;
   openedAt: string;
   closedAt?: string;

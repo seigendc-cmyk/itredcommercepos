@@ -6,6 +6,7 @@ import { createPurchaseOrderCallables } from './purchaseOrderCommands.js';
 import { createSupplierReceiptCallables } from './supplierReceiptCommands.js';
 import { createStocktakeCallables } from './stocktakeCommands.js';
 import { createStocktakeReversalCallable } from './stocktakeReversalCommands.js';
+import { createSaleCallable } from './saleCommands.js';
 
 initializeApp();
 const firestore = getFirestore();
@@ -17,6 +18,7 @@ export const {
 export const { postSupplierReceipt, reverseSupplierReceipt } = createSupplierReceiptCallables(firestore);
 export const { createStocktake, openStocktake, submitStocktakeCount, submitStocktake, approveStocktake, rejectStocktake, postStocktakeAdjustment, closeStocktake, cancelStocktake } = createStocktakeCallables(firestore);
 export const reverseStocktakeAdjustment = createStocktakeReversalCallable(firestore);
+export const completeSale = createSaleCallable(firestore);
 
 type Data = Record<string, unknown>;
 type Membership = { status: string; roleId: string; permissions: string[]; assignedWarehouseIds: string[]; assignedBranchIds: string[] };

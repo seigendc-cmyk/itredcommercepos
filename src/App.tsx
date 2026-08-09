@@ -582,7 +582,8 @@ export default function App() {
       const deliveryFee = deliveryDetails ? deliveryDetails.deliveryFee : 0;
       const finalTotalAmount = cartTotals.total + deliveryFee;
 
-      const saleResult = await processPOSOrder(authUser.uid, vendor.id, activeStaff.id, checkoutAttemptId, {
+      if (!activeShift) { alert('Open a terminal shift before completing a sale.'); return; }
+      const saleResult = await processPOSOrder(authUser.uid, vendor.id, activeStaff.id, checkoutAttemptId, activeShift.id, {
         vendorId: vendor.id,
         branchId: activeBranch.id,
         branchName: activeBranch.name,
@@ -646,22 +647,7 @@ export default function App() {
         );
         }
 
-        // Log in BI Layer
-        await logBIEvent(
-          vendor.id,
-          'POS_TRANSACTION',
-          `Completed Order ${newOrder.orderNumber} for $${newOrder.totalAmount.toFixed(2)} (${newOrder.paymentMethod})${deliveryDetails ? ' with Courier Dispatch' : ''}`,
-          { orderId: newOrder.id, itemsCount: newOrder.items.length, total: newOrder.totalAmount, delivery: !!deliveryDetails },
-          { staffId: activeStaff.id, staffName: activeStaff.name, staffRole: activeStaff.role, branchId: activeBranch.id, branchName: activeBranch.name }
-        );
-
-        // Record to active shift if present
-        if (activeShift) {
-          const updatedShift = await recordOrderToShift(vendor.id, activeShift.id, newOrder);
-          if (updatedShift) {
-            setActiveShift(updatedShift);
-          }
-        }
+        setActiveShift(previous => previous ? { ...previous, totalSales: previous.totalSales + newOrder.totalAmount, cashSales: previous.cashSales + (newOrder.paymentMethod === 'cash' ? newOrder.totalAmount : 0), cardSales: previous.cardSales + (newOrder.paymentMethod === 'card' ? newOrder.totalAmount : 0), mobileSales: previous.mobileSales + (newOrder.paymentMethod === 'mobile_money' ? newOrder.totalAmount : 0), transactionCount: previous.transactionCount + 1 } : previous);
         } catch (error) {
           console.warn('Sale committed but a post-sale activity failed:', error);
         }
@@ -688,6 +674,7 @@ export default function App() {
       terminalName: activeTerminal.name,
       staffId: activeStaff.id,
       staffName: activeStaff.name,
+      userUid: authUser?.uid,
       openingCash,
       openingNotes
     });

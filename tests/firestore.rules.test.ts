@@ -138,6 +138,16 @@ before(async () => {
   });
 });
 
+test('browser cannot forge completed sale, payment, receipt, command, or trusted shift totals', async () => {
+  await environment.withSecurityRulesDisabled(async context => { await setDoc(doc(context.firestore(),'vendors',VENDOR_A,'shifts','shift-sale'),{id:'shift-sale',tenantId:VENDOR_A,vendorId:VENDOR_A,branchId:BRANCH_A1,terminalId:TERMINAL_A1,status:'open',totalSales:0,cashSales:0,cardSales:0,mobileSales:0,transactionCount:0}); });
+  const db=environment.authenticatedContext('owner-a').firestore();
+  await assertFails(setDoc(doc(db,'vendors',VENDOR_A,'orders','forged-sale'),{tenantId:VENDOR_A,vendorId:VENDOR_A,branchId:BRANCH_A1,status:'completed'}));
+  await assertFails(setDoc(doc(db,'vendors',VENDOR_A,'payments','forged-payment'),{tenantId:VENDOR_A,vendorId:VENDOR_A,branchId:BRANCH_A1,status:'CONFIRMED'}));
+  await assertFails(setDoc(doc(db,'vendors',VENDOR_A,'receipts','forged-receipt'),{tenantId:VENDOR_A,vendorId:VENDOR_A,branchId:BRANCH_A1,saleId:'forged-sale'}));
+  await assertFails(setDoc(doc(db,'vendors',VENDOR_A,'sale_commands','forged-command'),{vendorId:VENDOR_A}));
+  await assertFails(updateDoc(doc(db,'vendors',VENDOR_A,'shifts','shift-sale'),{totalSales:100,cashSales:100,transactionCount:1}));
+});
+
 beforeEach(async () => {
   await environment.clearFirestore();
   await seed();

@@ -322,36 +322,45 @@ service cloud.firestore {
       match /orders/{saleId} {
         allow read: if tenantRecord(vendorId, resource.data)
           && canAccessBranch(vendorId, resource.data.branchId);
-        allow create, update: if hasPermission(vendorId, 'sale.complete')
-          && tenantRecord(vendorId, request.resource.data)
-          && canAccessBranch(vendorId, request.resource.data.branchId);
-        allow delete: if false;
+        allow create, update, delete: if false;
       }
 
       match /sales/{saleId} {
         allow read: if immutableTenantRecord(vendorId, resource.data)
           && canAccessBranch(vendorId, resource.data.branchId);
-        allow create, update: if hasPermission(vendorId, 'sale.complete')
-          && immutableTenantRecord(vendorId, request.resource.data)
-          && canAccessBranch(vendorId, request.resource.data.branchId);
-        allow delete: if false;
+        allow create, update, delete: if false;
       }
 
       match /payments/{paymentId} {
         allow read: if immutableTenantRecord(vendorId, resource.data)
           && canAccessBranch(vendorId, resource.data.branchId);
-        allow create: if hasPermission(vendorId, 'payment.create')
-          && immutableTenantRecord(vendorId, request.resource.data)
-          && canAccessBranch(vendorId, request.resource.data.branchId);
-        allow update, delete: if false;
+        allow create, update, delete: if false;
+      }
+
+      match /receipts/{receiptId} {
+        allow read: if immutableTenantRecord(vendorId, resource.data)
+          && canAccessBranch(vendorId, resource.data.branchId);
+        allow create, update, delete: if false;
+      }
+
+      match /sale_commands/{commandId} {
+        allow read, write: if false;
       }
 
       match /shifts/{shiftId} {
         allow read: if tenantRecord(vendorId, resource.data)
           && canAccessBranch(vendorId, resource.data.branchId);
-        allow create, update: if hasAnyPermission(vendorId, ['shift.open', 'shift.close'])
+        allow create: if hasPermission(vendorId, 'shift.open')
           && tenantRecord(vendorId, request.resource.data)
           && canAccessBranch(vendorId, request.resource.data.branchId);
+        allow update: if hasPermission(vendorId, 'shift.close')
+          && tenantRecord(vendorId, request.resource.data)
+          && canAccessBranch(vendorId, request.resource.data.branchId)
+          && request.resource.data.totalSales == resource.data.totalSales
+          && request.resource.data.cashSales == resource.data.cashSales
+          && request.resource.data.cardSales == resource.data.cardSales
+          && request.resource.data.mobileSales == resource.data.mobileSales
+          && request.resource.data.transactionCount == resource.data.transactionCount;
         allow delete: if false;
       }
 

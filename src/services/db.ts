@@ -73,6 +73,7 @@ import {
   SaleCompletionResult,
 } from './saleTransaction';
 import { createFirestoreAtomicSaleRunner } from '../features/inventory/infrastructure/firestoreSaleInventoryAdapter';
+import { completeOnlineSale } from './trustedSaleCommands';
 import {
   assertTerminalBelongsToActiveBranch,
   canResourceProcessTransactions,
@@ -1767,25 +1768,13 @@ export async function processPOSOrder(
   vendorId: string,
   actorId: string,
   orderId: string,
+  shiftId: string,
   orderData: Omit<Order, 'id' | 'createdAt' | 'status'>,
 ): Promise<SaleCompletionResult> {
-  const now = new Date().toISOString();
-  const result = await completeSaleTransaction(
-    {
-      tenantId,
-      vendorId,
-      actorId,
-      checkoutAttemptId: orderId,
-      orderId,
-      createdAt: now,
-      orderData,
-    },
-    createFirestoreAtomicSaleRunner(vendorId),
-  );
-
-  if (!result.success) {
-    return result;
-  }
+  if (tenantId !== vendorId || !actorId) return { success:false, code:'invalid_order', message:'The authenticated sale context is invalid.' };
+  try {
+    const authoritative=await completeOnlineSale({vendorId,saleId:orderId,commandId:orderId,branchId:orderData.branchId,terminalId:orderData.terminalId,shiftId,lines:orderData.items.map(item=>({productId:item.product.id,quantity:item.quantity,unitPrice:item.unitPrice,discount:item.discount})),payment:{method:orderData.paymentMethod,tenderedAmount:orderData.paymentDetails?.cashGiven,status:orderData.paymentMethod==='cash'?undefined:'CONFIRMED',provider:orderData.paymentDetails?.mobileProvider,reference:String(orderData.paymentDetails?.cardRef??orderData.paymentDetails?.mobileRef??'')}});
+    const result:SaleCompletionResult={success:true,order:authoritative.order,movements:[],duplicate:authoritative.duplicate};
 
   try {
     if (!result.duplicate) {
@@ -1810,7 +1799,8 @@ export async function processPOSOrder(
     console.warn('Committed sale local cache update failed:', error);
   }
 
-  return result;
+    return result;
+  } catch(error) { return {success:false,code:'write_failed',message:error instanceof Error?error.message:'The online sale could not be completed.'}; }
 }
 
 // Fetch Orders
@@ -3112,6 +3102,7 @@ export async function openTerminalShift(
     terminalName?: string;
     staffId: string;
     staffName: string;
+    userUid?: string;
     openingCash: number;
     openingNotes?: string;
   }
@@ -3128,6 +3119,7 @@ export async function openTerminalShift(
     terminalName: shiftData.terminalName || 'Main Register',
     staffId: shiftData.staffId,
     staffName: shiftData.staffName,
+    userUid: shiftData.userUid,
     openedAt: now,
     openingCash: Number(shiftData.openingCash) || 0,
     totalSales: 0,
